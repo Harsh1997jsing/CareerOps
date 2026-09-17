@@ -1,0 +1,87 @@
+"""
+Generates resume sections strictly from data/evidence.yaml and
+data/skills.yaml — never from a previously generated resume, so re-runs
+can't compound invented details onto earlier ones.
+"""
+
+import re
+from dataclasses import dataclass, field
+
+from app.llm.anthropic_client import structured_call
+from app.llm.prompts import RESUME_SECTION_PROMPT
+from app.llm.schemas import GeneratedResumeSection
+
+SECTIONS = ["summary", "skills", "experience", "projects", "education"]
+
+# A verbatim run this long or longer means the section is mirroring the job
+# description's exact phrasing rather than describing the candidate's own
+# experience. Shorter overlaps (a skill name, a job title) are expected and
+# are not what this guard is for.
+NGRAM_SIZE = 6
+
+# A stray one-off overlap can be a coincidence; flag a section only once it
+# has more than this many distinct mirrored phrases.
+MAX_ALLOWED_MATCHES = 2
+
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def check_keyword_density(generated_text: str, job_description: str,
+                           ngram_size: int = NGRAM_SIZE) -> list[str]:
+    """
+    Returns the verbatim `ngram_size`+ word phrases shared between the
+    generated text and the job description, in first-seen order.
+    """
+    gen_tokens = _tokenize(generated_text)
+    jd_tokens = _tokenize(job_description)
+
+    if len(jd_tokens) < ngram_size or len(gen_tokens) < ngram_size:
+        return []
+
+    jd_ngrams = {
+        " ".join(jd_tokens[i:i + ngram_size])
+        for i in range(len(jd_tokens) - ngram_size + 1)
+    }
+
+    flagged = []
+    for i in range(len(gen_tokens) - ngram_size + 1):
+        phrase = " ".join(gen_tokens[i:i + ngram_size])
+        if phrase in jd_ngrams and phrase not in flagged:
+            flagged.append(phrase)
+    return flagged
+
+
+@dataclass
+class ResumeGenerationResult:
+    sections: list[GeneratedResumeSection]
+    # section name -> mirrored phrases, only present for sections that
+    # tripped the keyword-density guard
+    keyword_density_warnings: dict[str, list[str]] = field(default_factory=dict)
+
+
+def generate_resume(job_description: str, skills_path: str, evidence_path: str) -> ResumeGenerationResult:
+    with open(skills_path) as f:
+        skills_yaml = f.read()
+    with open(evidence_path) as f:
+        evidence_yaml = f.read()
+
+    sections = []
+    warnings = {}
+
+    for section in SECTIONS:
+        prompt = RESUME_SECTION_PROMPT.format(
+            section=section,
+            job_description=job_description,
+            skills_yaml=skills_yaml,
+            evidence_yaml=evidence_yaml,
+        )
+        result = structured_call(prompt, GeneratedResumeSection)
+        sections.append(result)
+
+        flagged = check_keyword_density(result.content, job_description)
+        if len(flagged) > MAX_ALLOWED_MATCHES:
+            warnings[section] = flagged
+
+    return ResumeGenerationResult(sections=sections, keyword_density_warnings=warnings)

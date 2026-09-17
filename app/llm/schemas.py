@@ -40,3 +40,8 @@ class GeneratedResumeSection(BaseModel):
     section: Literal["summary", "skills", "experience", "projects", "education"]
     content: str
     evidence_ids_used: list[str]
+
+
+class GeneratedCoverLetter(BaseModel):
+    content: str
+    evidence_ids_used: list[str]
