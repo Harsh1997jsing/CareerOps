@@ -1,0 +1,20 @@
+# Every factual claim gets an ID. The claim validator checks every
+# generated resume/cover-letter statement against these IDs — an
+# unmatched claim blocks the application automatically.
+
+- id: EXP001
+  type: experience
+  company: "Company A"
+  title: "AI/ML Developer"
+  dates: "2023-01 to 2024-06"
+  claim: "Developed FastAPI-based ML services"
+  skills: [Python, FastAPI, Machine Learning]
+
+- id: PROJ004
+  type: project
+  claim: "Built a knowledge graph and data insight system"
+  skills: [Python, NLP, Knowledge Graph]
+
+- id: EDU001
+  type: education
+  claim: "B.Tech in Computer Science, [Your University], [Year]"

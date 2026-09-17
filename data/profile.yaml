@@ -1,0 +1,14 @@
+# Fill in with your real details. This is the root identity record —
+# every generated document pulls contact info from here.
+
+name: "Your Name"
+email: "you@example.com"
+phone: "+91-XXXXXXXXXX"
+location: "India"
+linkedin: "https://linkedin.com/in/your-handle"
+github: "https://github.com/your-handle"
+
+target_roles:
+  - AI Engineer
+  - ML Engineer
+  - Python Developer

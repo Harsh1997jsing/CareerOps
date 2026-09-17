@@ -1,0 +1,16 @@
+programming:
+  - Python
+  - SQL
+
+ml:
+  - TensorFlow
+  - PyTorch
+  - Scikit-Learn
+
+backend:
+  - FastAPI
+  - Flask
+
+data:
+  - Pandas
+  - ETL

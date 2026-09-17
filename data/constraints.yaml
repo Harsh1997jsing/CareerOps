@@ -1,0 +1,19 @@
+allowed_locations:
+  - Remote
+  - Bangalore
+  - Pune
+  - Hyderabad
+
+employment_types:
+  - Full-time
+
+minimum_experience_years: 0
+acceptable_experience_gap_years: 1   # how far over your actual years a posting can ask for before auto-reject
+
+exclude_keywords:
+  - unpaid internship
+  - commission-only
+  - relocation required
+
+# how many days must pass before re-applying to the same company
+company_cooldown_days: 30
