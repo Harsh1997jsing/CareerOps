@@ -15,4 +15,5 @@ if you're about to assume the pipeline runs end-to-end; it doesn't yet.
 - [phase-4-dashboard.md](phase-4-dashboard.md) — Streamlit review dashboard
 - [phase-5-ingestion.md](phase-5-ingestion.md) — Greenhouse + Lever job ingestion
 - [phase-6-tracker.md](phase-6-tracker.md) — manual-submit tracking
+- [api.md](api.md) — FastAPI backend endpoints and completion status
 - [known-gaps.md](known-gaps.md) — what's NOT done yet
