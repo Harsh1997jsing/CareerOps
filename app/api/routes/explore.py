@@ -2,12 +2,15 @@
 
 Allows querying connected MCP servers for capabilities, fanning out live searches,
 and saving selected postings into the local `jobs` table.
+
+Every route requires a valid bearer token (`Depends(get_current_user)` at
+the router level, audit finding F1).
 """
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_db_engine
+from app.api.dependencies import get_current_user, get_db
 from app.api.schemas import (
     CapabilityMatrixOut,
     ExploreResultOut,
@@ -18,7 +21,7 @@ from app.api.schemas import (
 from app.sources.common import description_hash, insert_jobs
 from app.sources.mcp import explore as mcp_explore
 
-router = APIRouter(prefix="/explore", tags=["explore"])
+router = APIRouter(prefix="/explore", tags=["explore"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/capabilities", response_model=dict[str, CapabilityMatrixOut])
@@ -48,7 +51,7 @@ async def search(payload: ExploreSearchRequest):
 
 
 @router.post("/save", response_model=ExploreSaveResponseOut)
-def save(payload: ExploreSaveRequest, engine: Engine = Depends(get_db_engine)):
+async def save(payload: ExploreSaveRequest, session: AsyncSession = Depends(get_db)):
     """Persist a selected exploration result into the local `jobs` table.
 
     Explore results aren't cached server-side (see mcp/explore.py), so
@@ -58,7 +61,7 @@ def save(payload: ExploreSaveRequest, engine: Engine = Depends(get_db_engine)):
 
     Args:
         payload: ExploreSaveRequest containing full job posting details.
-        engine: Database engine dependency.
+        session: Database session dependency.
 
     Returns:
         ExploreSaveResponseOut: Whether the job was newly inserted (False if duplicate).
@@ -75,5 +78,5 @@ def save(payload: ExploreSaveRequest, engine: Engine = Depends(get_db_engine)):
         "employment_type": payload.employment_type,
         "posted_at": None,
     }
-    inserted = insert_jobs(engine, [job])
+    inserted = await insert_jobs(session, [job])
     return ExploreSaveResponseOut(inserted=bool(inserted))

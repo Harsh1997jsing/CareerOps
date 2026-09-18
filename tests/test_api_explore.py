@@ -2,13 +2,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_db_engine
+from app.api.dependencies import get_current_user, get_db
 from app.api.main import app
 from app.sources.mcp.capabilities import build_capability_matrix
 from mcp.types import Tool
+from tests.conftest import FAKE_USER_CONTEXT
 
 client = TestClient(app)
-app.dependency_overrides[get_db_engine] = lambda: MagicMock()
+app.dependency_overrides[get_db] = lambda: iter([MagicMock()])
+app.dependency_overrides[get_current_user] = lambda: FAKE_USER_CONTEXT
 
 RESULT = {
     "source": "jobo",
@@ -24,6 +26,17 @@ RESULT = {
     "salary_min": 1000000,
     "salary_max": 1500000,
 }
+
+
+def test_search_requires_authentication():
+    # Audit finding F1: /explore/* required no auth at all.
+    app.dependency_overrides.pop(get_current_user, None)
+    try:
+        response = client.post("/explore/search", json={"query": "backend engineer"})
+    finally:
+        app.dependency_overrides[get_current_user] = lambda: FAKE_USER_CONTEXT
+
+    assert response.status_code == 401
 
 
 def test_search_returns_normalized_results():
@@ -55,7 +68,7 @@ def test_capabilities_returns_flags_per_source():
 
 
 def test_save_inserts_job_and_reports_inserted_true():
-    with patch("app.api.routes.explore.insert_jobs", return_value=1) as mock_insert:
+    with patch("app.api.routes.explore.insert_jobs", AsyncMock(return_value=1)) as mock_insert:
         response = client.post("/explore/save", json=RESULT)
 
     assert response.status_code == 200
@@ -66,7 +79,7 @@ def test_save_inserts_job_and_reports_inserted_true():
 
 
 def test_save_reports_inserted_false_for_a_duplicate():
-    with patch("app.api.routes.explore.insert_jobs", return_value=0):
+    with patch("app.api.routes.explore.insert_jobs", AsyncMock(return_value=0)):
         response = client.post("/explore/save", json=RESULT)
 
     assert response.json()["inserted"] is False

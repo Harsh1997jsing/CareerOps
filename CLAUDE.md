@@ -12,6 +12,11 @@ generated claim and the document's ATS-compatibility, and tracks applications
 full originally planned scope) are built. See `memory/` for what was built in
 each phase, why, and what's still missing before this works end-to-end.
 
+**Changing anything under `app/api/`?** Read `CONTRACT.md` first and update
+it (and its twin, `../CareerOps-frontend/CONTRACT.md`) in the same change —
+they're the synced wire-contract reference between this backend and the
+separate frontend repo.
+
 ## Hard rules
 
 These constrain every change in this repo, not just the phase they were
@@ -56,11 +61,13 @@ python3.12 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env             # then fill in ANTHROPIC_API_KEY
+cp .env.example .env             # then fill in ANTHROPIC_API_KEY, JWT_SECRET_KEY,
+                                  # DEFAULT_ADMIN_PASSWORD (all required — the app
+                                  # fails fast at startup if any are unset)
                                   # (JOBO_MCP_API_KEY/HASDATA_* are optional — only needed for Explore)
 
 docker compose up -d             # starts Postgres
-psql postgresql://careerops:careerops@localhost:5432/careerops -f schema.sql
+alembic upgrade head             # applies migrations/ — the schema's source of truth
 ```
 
 Run the full test suite (no API key needed — every LLM/DB call is mocked):
@@ -146,16 +153,19 @@ not generated:
 5. `app/services/claim_validator.py` / `ats_validator.py`, gated through
    `app/services/document_review.py` — the only code path allowed to set
    `generated_documents.claim_check_passed`/`ats_check_passed`.
-6. `app/dashboard.py` (Streamlit UI) + `app/services/dashboard_data.py` (its
-   DB layer) — human reviews fit/matches/gaps and generated documents next
-   to evidence, and Approve/Reject sets `applications.status` to
+6. `app/api/` (FastAPI, `uvicorn app.api.main:app --reload`) — the only
+   review surface now; the Streamlit dashboard (`app/dashboard.py`) was
+   removed, and `../frontend` (a React app meant to replace it) hasn't been
+   scaffolded yet, so there is currently no working UI — see
+   `memory/known-gaps.md`. `app/services/jobs.py` (list_jobs, get_job,
+   list_generated_documents) and `app/services/applications.py`
+   (get_application_context, approve/reject_application,
+   check_cooldown_for_company) are its DB layer — split by resource, not one
+   combined module. Approve/Reject sets `applications.status` to
    `APPROVED`/`REJECTED`. This is **not** the same as `APPLIED` — see next.
-   `app/api/` (FastAPI, `uvicorn app.api.main:app --reload`) is a second,
-   parallel UI surface for `../frontend` (a React app, not yet scaffolded)
-   — same `dashboard_data.py`/`tracker.py` functions underneath, just
-   reached over HTTP instead of imported in-process. Route handlers stay
-   thin wrappers; new query logic belongs in `dashboard_data.py`, not in
-   `app/api/routes/*.py`.
+   Route handlers stay thin `async def` wrappers over an injected
+   `AsyncSession`; new query logic belongs in `app/services/jobs.py` /
+   `applications.py`, not in `app/api/routes/*.py`.
 7. `app/services/tracker.py` — `open_job_url()` opens the posting for manual
    application; `mark_applied()` is the only path to `applications.status =
    APPLIED`, requires explicit `confirmed=True`, and upserts
@@ -188,19 +198,32 @@ not generated:
   multi-column sections (via the `w:cols/@w:num` XML attribute — python-docx
   has no public API for column count).
 
-**Database (`schema.sql`):** run once by hand to bootstrap Postgres; the
-comment at the top says to switch to Alembic migrations
-(`alembic init migrations`) once past the POC stage. Tables: `jobs`,
-`job_analysis`, `evidence`, `generated_documents`, `applications`,
-`company_application_history`. All DB access goes through
-`app/db.py:get_engine()` (a cached SQLAlchemy engine reading
-`DATABASE_URL`) — no module should construct its own engine.
+**Database (`app/models/`, real SQLAlchemy ORM — declarative `Base` classes,
+not raw SQL):** the single source of truth for every table's shape. Tables:
+`Tenant`/`User` (multi-tenant auth), `Job`/`JobAnalysis`, `Evidence`,
+`GeneratedDocument`, `Application`/`CompanyApplicationHistory`. Every
+service function queries through these — no hand-written SQL strings
+anywhere in `app/services/` or `app/sources/` (the one exception:
+`app/core/database.py`'s trivial `SELECT 1` health check). `migrations/`
+(Alembic, `alembic upgrade head`) is how that schema reaches a real
+database; `schema.sql` and the old hand-rolled DDL in `init_db()` were
+removed in favor of this — two sources of truth for one schema is exactly
+what Alembic exists to prevent. All DB access goes through
+`app/core/database.py:get_db()` (FastAPI dependency yielding an
+`AsyncSession`) or `get_engine()` (the underlying cached `AsyncEngine`, for
+code that isn't a request handler) — no module should construct its own
+engine or session factory. Every service function that touches the DB is
+`async def`; `get_engine()` auto-upgrades a plain `postgresql://`/
+`sqlite://` `DATABASE_URL` to its async-driver form (`asyncpg`/`aiosqlite`)
+so `.env` never has to name the driver. `migrations/env.py` is the one
+place that deliberately stays on the plain sync URL (`psycopg2`) — a
+one-off CLI migration run has no need for an async driver.
 
 Known naming mismatch worth checking before relying on it:
 `JobFitAnalysis.missing_requirements` (the LLM output field in
-`schemas.py`) vs `job_analysis.missing_skills` (the DB column in
-`schema.sql`) refer to the same concept under different names. Nothing
-currently writes a `JobFitAnalysis` into `job_analysis`, so this hasn't
+`schemas.py`) vs `JobAnalysis.missing_skills` (the ORM column, `app/models/
+job.py`) refer to the same concept under different names. Nothing
+currently writes a `JobFitAnalysis` into a `JobAnalysis` row, so this hasn't
 caused a bug yet — but whoever adds that write path needs to map one to the
 other explicitly. See `memory/known-gaps.md`.
 

@@ -9,7 +9,7 @@ connectors under app/sources/mcp/. See CLAUDE.md rule 2.
 import logging
 
 import yaml
-from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.sources import greenhouse, lever
 from app.sources.common import insert_jobs
@@ -63,19 +63,20 @@ def fetch_all_targets(path: str = COMPANIES_PATH) -> list[dict]:
     return jobs
 
 
-def ingest_all(engine: Engine, path: str = COMPANIES_PATH) -> int:
+async def ingest_all(session: AsyncSession, path: str = COMPANIES_PATH) -> int:
     """Fetch postings from all configured company targets and persist them to the database.
 
     Fetches every configured target and inserts new postings into `jobs`.
     Returns the number of rows actually inserted (excludes duplicates
-    already collected).
+    already collected). Fetching itself (greenhouse/lever's `requests`
+    calls) stays synchronous — only the DB write is async.
 
     Args:
-        engine: Database engine.
+        session: Database session.
         path: Filepath to company targets configuration.
 
     Returns:
         int: Number of new jobs inserted.
     """
     jobs = fetch_all_targets(path)
-    return insert_jobs(engine, jobs)
+    return await insert_jobs(session, jobs)

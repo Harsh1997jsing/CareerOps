@@ -9,8 +9,10 @@ already collected.
 import hashlib
 import re
 
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Job
 
 # No source adapter should ever pull more than this many postings in one
 # run — this is a job-fit assistant, not a scraper.
@@ -102,17 +104,22 @@ def normalize_employment_type(raw_type: str | None) -> str | None:
     return EMPLOYMENT_TYPE_ALIASES.get(raw_type.strip().lower(), raw_type.strip())
 
 
-def insert_jobs(engine: Engine, jobs: list[dict]) -> int:
+async def insert_jobs(session: AsyncSession, jobs: list[dict]) -> int:
     """Insert normalized jobs into the database, skipping duplicates.
 
     Inserts normalized jobs one at a time, skipping any whose
     description_hash already exists (relies on the UNIQUE constraint on
-    jobs.description_hash in schema.sql). Returns the number of rows
-    actually inserted (i.e. excluding duplicates).
+    Job.description_hash — see app/models/job.py). Each insert attempt runs
+    in its own SAVEPOINT so one duplicate doesn't abort the rest of the
+    batch. Returns the number of rows actually inserted (excluding
+    duplicates).
 
     Args:
-        engine: Database engine instance.
-        jobs: List of normalized job dictionaries.
+        session: Database session.
+        jobs: List of normalized job dictionaries — keys must match Job's
+            column names (source, source_job_id, company, title, location,
+            url, description, description_hash, employment_type, posted_at,
+            and optionally salary_min/salary_max).
 
     Returns:
         int: Number of new rows inserted.
@@ -121,17 +128,13 @@ def insert_jobs(engine: Engine, jobs: list[dict]) -> int:
         return 0
 
     inserted = 0
-    with engine.begin() as conn:
-        for job in jobs:
-            result = conn.execute(
-                text(
-                    "INSERT INTO jobs (source, source_job_id, company, title, location, url, "
-                    "description, description_hash, employment_type, posted_at) "
-                    "VALUES (:source, :source_job_id, :company, :title, :location, :url, "
-                    ":description, :description_hash, :employment_type, :posted_at) "
-                    "ON CONFLICT (description_hash) DO NOTHING"
-                ),
-                job,
-            )
-            inserted += result.rowcount
+    for job in jobs:
+        try:
+            async with session.begin_nested():
+                session.add(Job(**job))
+        except IntegrityError:
+            continue
+        inserted += 1
+
+    await session.commit()
     return inserted

@@ -6,6 +6,7 @@ site list on every call, never optional — see CLAUDE.md rule 2.
 
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import date, datetime
 
 from jobspy import scrape_jobs
@@ -22,6 +23,16 @@ from app.sources.common import (
 # deliberately absent — CLAUDE.md rule 2 forbids it outright, so it's
 # filtered out below even if a caller passes it explicitly.
 ALLOWED_SITES = ["indeed", "glassdoor", "naukri", "zip_recruiter", "google"]
+
+# jobspy.scrape_jobs() accepts **kwargs but doesn't actually thread a
+# timeout through to any scraper (verified against the installed
+# python-jobspy source — the kwarg is silently dropped). Each site scraper
+# hardcodes its own short per-request timeout internally (10-15s), but
+# there's no outer bound on the whole call, which fans out to every
+# requested site concurrently via jobspy's own thread pool. This wraps it
+# in one so a single hung site can't block the caller indefinitely
+# (audit finding F10).
+FETCH_TIMEOUT_SECONDS = 90
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +136,24 @@ def fetch_jobs(
         return []
 
     limit = min(results_wanted, MAX_JOBS_PER_RUN)
-    df = scrape_jobs(
-        site_name=site_name,
-        search_term=search_term,
-        location=location,
-        results_wanted=limit,
-        **kwargs,
-    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            scrape_jobs,
+            site_name=site_name,
+            search_term=search_term,
+            location=location,
+            results_wanted=limit,
+            **kwargs,
+        )
+        try:
+            df = future.result(timeout=FETCH_TIMEOUT_SECONDS)
+        except FutureTimeoutError as exc:
+            raise TimeoutError(
+                f"jobspy.scrape_jobs() did not return within {FETCH_TIMEOUT_SECONDS}s "
+                f"(sites={site_name}, search_term={search_term!r})"
+            ) from exc
+
     if df is None or df.empty:
         return []
 

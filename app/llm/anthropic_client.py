@@ -1,7 +1,10 @@
 """
 Single wrapper around the Anthropic SDK. Every service module imports
 from here rather than calling anthropic.Anthropic() directly, so the
-model string and retry logic live in exactly one place.
+model string lives in exactly one place. No retry logic is implemented
+here — this relies entirely on the SDK's own default retry behavior
+(audit finding F11: an earlier version of this docstring claimed retry
+logic lived here; it never did).
 """
 
 from anthropic import Anthropic

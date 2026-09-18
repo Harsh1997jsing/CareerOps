@@ -1,8 +1,10 @@
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
+from app.models import Application, CompanyApplicationHistory, Job
 from app.services.tracker import (
     APPLIED_STATUS,
     ApplicationNotConfirmedError,
@@ -18,49 +20,75 @@ def test_open_job_url_calls_webbrowser_open():
     mock_open.assert_called_once_with("https://example.com/job/1")
 
 
-def _make_mock_engine():
-    mock_engine = MagicMock()
-    mock_conn = MagicMock()
-    mock_engine.begin.return_value.__enter__.return_value = mock_conn
-    return mock_engine, mock_conn
+async def _make_job_and_application(session, job_id=2, application_id=1):
+    job = Job(
+        id=job_id, source="greenhouse", company="Acme", title="Engineer",
+        url="https://example.com", description="desc", status="READY_FOR_REVIEW",
+    )
+    application = Application(id=application_id, job_id=job_id, status="READY_FOR_REVIEW")
+    session.add_all([job, application])
+    await session.commit()
+    return job, application
 
 
-def test_mark_applied_refuses_without_confirmation():
-    mock_engine, _ = _make_mock_engine()
+async def _history_rows(session, company, job_id):
+    stmt = select(CompanyApplicationHistory).filter_by(company=company, job_id=job_id)
+    return (await session.scalars(stmt)).all()
 
+
+async def test_mark_applied_refuses_without_confirmation(db_session):
     with pytest.raises(ApplicationNotConfirmedError):
-        mark_applied(mock_engine, application_id=1, job_id=1, company="Acme", confirmed=False)
+        await mark_applied(db_session, application_id=1, job_id=1, company="Acme", confirmed=False)
 
-    mock_engine.begin.assert_not_called()
+    assert (await db_session.scalars(select(Application))).first() is None
 
 
-def test_mark_applied_updates_status_and_history_when_confirmed():
-    mock_engine, mock_conn = _make_mock_engine()
+async def test_mark_applied_updates_status_and_history_when_confirmed(db_session):
+    await _make_job_and_application(db_session, job_id=2, application_id=1)
     applied_at = datetime(2026, 1, 15, 9, 0, 0)
 
-    mark_applied(
-        mock_engine, application_id=1, job_id=2, company="Acme",
+    await mark_applied(
+        db_session, application_id=1, job_id=2, company="Acme",
         confirmed=True, applied_at=applied_at,
     )
 
-    assert mock_conn.execute.call_count == 2
+    application = await db_session.get(Application, 1)
+    assert application.status == APPLIED_STATUS
+    assert application.applied_at == applied_at
 
-    update_call, insert_call = mock_conn.execute.call_args_list
-    update_params = update_call[0][1]
-    insert_params = insert_call[0][1]
-
-    assert update_params == {
-        "status": APPLIED_STATUS, "applied_at": applied_at, "application_id": 1,
-    }
-    assert insert_params == {"company": "Acme", "job_id": 2, "applied_at": applied_at}
+    rows = await _history_rows(db_session, "Acme", 2)
+    assert len(rows) == 1
+    assert rows[0].applied_at == applied_at
 
 
-def test_mark_applied_defaults_applied_at_to_now():
-    mock_engine, mock_conn = _make_mock_engine()
+async def test_mark_applied_updates_existing_history_row_instead_of_duplicating(db_session):
+    await _make_job_and_application(db_session, job_id=2, application_id=1)
+    first = datetime(2026, 1, 1, 9, 0, 0)
+    second = datetime(2026, 1, 15, 9, 0, 0)
+
+    await mark_applied(db_session, application_id=1, job_id=2, company="Acme", confirmed=True, applied_at=first)
+    await mark_applied(db_session, application_id=1, job_id=2, company="Acme", confirmed=True, applied_at=second)
+
+    rows = await _history_rows(db_session, "Acme", 2)
+    assert len(rows) == 1
+    assert rows[0].applied_at == second
+
+
+async def test_mark_applied_defaults_applied_at_to_now(db_session):
+    await _make_job_and_application(db_session, job_id=2, application_id=1)
     before = datetime.now()
 
-    mark_applied(mock_engine, application_id=1, job_id=2, company="Acme", confirmed=True)
+    await mark_applied(db_session, application_id=1, job_id=2, company="Acme", confirmed=True)
 
     after = datetime.now()
-    update_params = mock_conn.execute.call_args_list[0][0][1]
-    assert before <= update_params["applied_at"] <= after
+    application = await db_session.get(Application, 1)
+    assert before <= application.applied_at <= after
+
+
+async def test_mark_applied_does_not_fail_when_application_missing(db_session):
+    # No Application row for id=1 — mirrors the old raw-SQL UPDATE's silent
+    # no-op on zero matched rows; history is still recorded.
+    await mark_applied(db_session, application_id=1, job_id=2, company="Acme", confirmed=True)
+
+    rows = await _history_rows(db_session, "Acme", 2)
+    assert len(rows) == 1

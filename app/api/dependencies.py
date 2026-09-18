@@ -1,43 +1,37 @@
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import (
     InvalidTokenError,
     TokenExpiredError,
     decode_access_token,
     get_db as core_get_db,
-    get_engine,
 )
 from app.services.auth import UserContext, get_user_by_id
 
 security_bearer = HTTPBearer(auto_error=False)
 
 
-def get_db_engine() -> Engine:
-    """FastAPI dependency that provides the shared SQLAlchemy database Engine.
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency that provides a managed async SQLAlchemy database Session.
 
-    Returns:
-        Engine: Shared database engine instance for executing queries.
-    """
-    return get_engine()
-
-
-def get_db() -> Generator[Session, None, None]:
-    """FastAPI dependency that provides a managed SQLAlchemy database Session.
+    The only way any route touches the database — every service function
+    under app/services/ takes an AsyncSession, queried through app/models/'s
+    ORM classes. No route or service should construct its own engine/session.
 
     Yields:
-        Session: Open database session for executing ORM and SQL queries.
+        AsyncSession: Open database session for executing ORM queries.
     """
-    yield from core_get_db()
+    async for session in core_get_db():
+        yield session
 
 
-def get_current_user(
+async def get_current_user(
     auth: HTTPAuthorizationCredentials | None = Security(security_bearer),
-    engine: Engine = Depends(get_db_engine),
+    session: AsyncSession = Depends(get_db),
 ) -> UserContext:
     """FastAPI dependency to extract and authenticate the current user from stateless JWT.
 
@@ -45,7 +39,7 @@ def get_current_user(
 
     Args:
         auth: Bearer token credentials from Authorization header.
-        engine: Database engine dependency.
+        session: Database session dependency.
 
     Returns:
         UserContext: Context containing user_id, tenant_id, tenant_slug, email, and role.
@@ -94,7 +88,7 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = get_user_by_id(engine, user_id_int)
+    user = await get_user_by_id(session, user_id_int)
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -130,4 +124,3 @@ def require_admin(current_user: UserContext = Depends(get_current_user)) -> User
             detail="Administrator role required for this action",
         )
     return current_user
-

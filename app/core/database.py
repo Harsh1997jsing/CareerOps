@@ -1,29 +1,60 @@
-"""Centralized database connection and engine management for CareerOps.
+"""Centralized async database connection and engine management for CareerOps.
 
-Configures resilient connection pooling with pre-ping validation, session factory,
-FastAPI dependency injection, and schema bootstrapping across PostgreSQL and SQLite.
+Configures resilient connection pooling with pre-ping validation, an async
+session factory, FastAPI dependency injection, and dev/test schema
+bootstrapping across PostgreSQL and SQLite. Runtime queries go through an
+async engine (`asyncpg` for Postgres, `aiosqlite` for SQLite); Alembic
+migrations (migrations/env.py) deliberately keep using the plain sync
+`DATABASE_URL` — a one-off CLI process has no need for an async driver,
+and it avoids asyncpg/alembic integration entirely.
+
+Schema ownership: app/models/ (SQLAlchemy ORM declarative models) is the
+single source of truth for table shape; migrations/ (Alembic) is how that
+schema reaches a real database. `init_db()`'s `Base.metadata.create_all()`
+call is a dev/test convenience only — idempotent and safe to run alongside
+Alembic, but it will never apply a schema *change* to an existing table
+the way a migration does. A real deployment should run `alembic upgrade
+head`, not rely on this.
 """
 
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 from functools import lru_cache
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
 from app.core.exceptions import ConfigurationError
+from app.models import Base, Tenant, User
+
+
+def _to_async_url(database_url: str) -> str:
+    """Upgrades a plain DATABASE_URL to its async-driver equivalent.
+
+    Lets `.env`'s DATABASE_URL stay in the ordinary `postgresql://...` /
+    `sqlite:///...` form everyone (Alembic, `psql`, docs) expects — this is
+    the only place that needs to know the runtime uses asyncpg/aiosqlite.
+    A URL that already names a driver (`postgresql+asyncpg://`, a custom
+    dialect) passes through unchanged.
+    """
+    if database_url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + database_url[len("postgresql://"):]
+    if database_url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + database_url[len("postgres://"):]
+    if database_url.startswith("sqlite://"):
+        return "sqlite+aiosqlite://" + database_url[len("sqlite://"):]
+    return database_url
 
 
 @lru_cache(maxsize=1)
-def get_engine() -> Engine:
-    """Create and cache a singleton SQLAlchemy Engine instance with resilient connection pooling.
+def get_engine() -> AsyncEngine:
+    """Create and cache a singleton async SQLAlchemy Engine with resilient connection pooling.
 
     Uses `DATABASE_URL` from centralized application settings. Configures
     connection pool health pre-pinging, recycling, and pooling limits.
 
     Returns:
-        Engine: Cached SQLAlchemy Engine connected to the database.
+        AsyncEngine: Cached async SQLAlchemy Engine connected to the database.
 
     Raises:
         ConfigurationError: If the `DATABASE_URL` setting is empty or undefined.
@@ -36,7 +67,8 @@ def get_engine() -> Engine:
             "Please configure DATABASE_URL in your .env or environment."
         )
 
-    is_sqlite = database_url.startswith("sqlite")
+    async_url = _to_async_url(database_url)
+    is_sqlite = async_url.startswith("sqlite")
     engine_kwargs: dict = {"pool_pre_ping": True}
 
     if not is_sqlite:
@@ -48,265 +80,96 @@ def get_engine() -> Engine:
             }
         )
 
-    return create_engine(database_url, **engine_kwargs)
+    return create_async_engine(async_url, **engine_kwargs)
 
 
 @lru_cache(maxsize=1)
-def get_session_factory() -> sessionmaker[Session]:
-    """Create and cache the SQLAlchemy sessionmaker bound to the shared engine.
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Create and cache the async sessionmaker bound to the shared engine.
+
+    `expire_on_commit=False` — the default (True) expires every attribute
+    after commit, and re-reading one afterward would silently try to
+    lazy-load it, which fails outside an awaited context (SQLAlchemy's
+    "greenlet_spawn has not been called" error). Standard practice for
+    async SQLAlchemy: turn it off, accept slightly-stale in-memory values
+    after a commit within the same request.
 
     Returns:
-        sessionmaker: Session factory producing transactional sessions.
+        async_sessionmaker: Session factory producing transactional async sessions.
     """
     engine = get_engine()
-    return sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return async_sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False)
 
 
-def get_db() -> Generator[Session, None, None]:
-    """FastAPI dependency yielding a managed transactional database session.
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency yielding a managed transactional async database session.
 
     Ensures the session is cleanly closed upon request completion.
 
     Yields:
-        Session: Open SQLAlchemy database session.
+        AsyncSession: Open async database session.
     """
     session_factory = get_session_factory()
-    session = session_factory()
-    try:
+    async with session_factory() as session:
         yield session
-    finally:
-        session.close()
 
 
-def check_database_health(engine: Engine | None = None) -> bool:
+async def check_database_health(engine: AsyncEngine | None = None) -> bool:
     """Verify database connectivity by executing a lightweight ping query.
 
     Args:
-        engine: Optional Engine instance (defaults to singleton engine).
+        engine: Optional AsyncEngine instance (defaults to singleton engine).
 
     Returns:
-        bool: True if connection succeeded; False otherwise.
+        bool: True if connection succeeded; False otherwise — including if
+            `DATABASE_URL` isn't configured at all (get_engine() raises
+            ConfigurationError in that case). A health check must report
+            "not healthy," never crash, on a misconfigured deployment —
+            this used to call get_engine() outside the try/except.
     """
-    db_engine = engine or get_engine()
     try:
-        with db_engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        db_engine = engine or get_engine()
+        async with db_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
         return True
     except Exception:
         return False
 
 
-def init_db(engine: Engine | None = None) -> None:
-    """Bootstrap complete CareerOps schema, tables, indexes, and seed default admin.
-
-    Supports both PostgreSQL and SQLite dialects automatically.
+async def init_db(engine: AsyncEngine | None = None) -> None:
+    """Create tables (dev/test convenience — see module docstring) and seed the
+    default tenant + protected default admin if they don't already exist.
 
     Args:
-        engine: Optional SQLAlchemy Engine instance.
+        engine: Optional async SQLAlchemy Engine instance.
     """
     from app.core.security import hash_password
 
     settings = get_settings()
     db_engine = engine or get_engine()
-    is_sqlite = db_engine.dialect.name == "sqlite"
 
-    id_type = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "SERIAL PRIMARY KEY"
-    time_default = "CURRENT_TIMESTAMP" if is_sqlite else "now()"
-    bool_true = "1" if is_sqlite else "true"
-    bool_false = "0" if is_sqlite else "false"
+    async with db_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
-    with db_engine.begin() as conn:
-        # 1. Tenants table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS tenants (
-                    id {id_type},
-                    name TEXT NOT NULL,
-                    slug TEXT NOT NULL UNIQUE,
-                    is_active BOOLEAN DEFAULT {bool_true},
-                    created_at TIMESTAMP DEFAULT {time_default}
-                )
-                """
-            )
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        tenant = await session.scalar(select(Tenant).where(Tenant.slug == settings.default_tenant_slug))
+        if tenant is None:
+            tenant = Tenant(name=settings.default_tenant_name, slug=settings.default_tenant_slug)
+            session.add(tenant)
+            await session.flush()
+
+        admin = await session.scalar(
+            select(User).where(User.tenant_id == tenant.id, User.email == settings.default_admin_email)
         )
-
-        # 2. Users table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS users (
-                    id {id_type},
-                    tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
-                    email TEXT NOT NULL,
-                    hashed_password TEXT NOT NULL,
-                    role TEXT NOT NULL DEFAULT 'user',
-                    is_default_admin BOOLEAN DEFAULT {bool_false},
-                    is_active BOOLEAN DEFAULT {bool_true},
-                    created_at TIMESTAMP DEFAULT {time_default},
-                    UNIQUE (tenant_id, email)
+        if admin is None:
+            session.add(
+                User(
+                    tenant_id=tenant.id,
+                    email=settings.default_admin_email,
+                    hashed_password=hash_password(settings.default_admin_password),
+                    role="admin",
+                    is_default_admin=True,
+                    is_active=True,
                 )
-                """
-            )
-        )
-
-        # 3. Jobs table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id {id_type},
-                    source TEXT NOT NULL,
-                    source_job_id TEXT,
-                    company TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    location TEXT,
-                    url TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    description_hash TEXT UNIQUE,
-                    posted_at TIMESTAMP,
-                    collected_at TIMESTAMP DEFAULT {time_default},
-                    employment_type TEXT,
-                    salary_min INTEGER,
-                    salary_max INTEGER,
-                    status TEXT DEFAULT 'DISCOVERED'
-                )
-                """
-            )
-        )
-
-        # 4. Job analysis table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS job_analysis (
-                    id {id_type},
-                    job_id INTEGER REFERENCES jobs(id),
-                    fit_score INTEGER,
-                    confidence TEXT,
-                    eligible BOOLEAN,
-                    strong_matches JSON,
-                    missing_skills JSON,
-                    risks JSON,
-                    analyzed_at TIMESTAMP DEFAULT {time_default}
-                )
-                """
-            )
-        )
-
-        # 5. Evidence table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS evidence (
-                    id TEXT PRIMARY KEY,
-                    claim TEXT NOT NULL,
-                    category TEXT,
-                    source TEXT,
-                    verified BOOLEAN DEFAULT {bool_true}
-                )
-                """
-            )
-        )
-
-        # 6. Generated documents table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS generated_documents (
-                    id {id_type},
-                    job_id INTEGER REFERENCES jobs(id),
-                    type TEXT,
-                    file_path TEXT,
-                    version INTEGER DEFAULT 1,
-                    claim_check_passed BOOLEAN,
-                    ats_check_passed BOOLEAN,
-                    created_at TIMESTAMP DEFAULT {time_default}
-                )
-                """
-            )
-        )
-
-        # 7. Applications table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS applications (
-                    id {id_type},
-                    job_id INTEGER REFERENCES jobs(id),
-                    status TEXT DEFAULT 'READY_FOR_REVIEW',
-                    applied_at TIMESTAMP,
-                    resume_version INTEGER,
-                    cover_letter_version INTEGER,
-                    notes TEXT
-                )
-                """
-            )
-        )
-
-        # 8. Company application history
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS company_application_history (
-                    id {id_type},
-                    company TEXT NOT NULL,
-                    job_id INTEGER REFERENCES jobs(id),
-                    applied_at TIMESTAMP,
-                    UNIQUE (company, job_id)
-                )
-                """
-            )
-        )
-
-        # 9. Performance Indexes
-        indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
-            "CREATE INDEX IF NOT EXISTS idx_jobs_collected_at ON jobs(collected_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_job_analysis_job_analyzed ON job_analysis(job_id, analyzed_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_applications_job_id ON applications(job_id)",
-            "CREATE INDEX IF NOT EXISTS idx_gen_docs_job_id ON generated_documents(job_id)",
-            "CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id)",
-        ]
-        for idx_sql in indexes:
-            try:
-                conn.execute(text(idx_sql))
-            except Exception:
-                pass
-
-        # 10. Ensure default tenant exists
-        row = conn.execute(
-            text("SELECT id FROM tenants WHERE slug = :slug"),
-            {"slug": settings.default_tenant_slug},
-        ).mappings().first()
-
-        if row is None:
-            res = conn.execute(
-                text("INSERT INTO tenants (name, slug) VALUES (:name, :slug) RETURNING id"),
-                {"name": settings.default_tenant_name, "slug": settings.default_tenant_slug},
-            ).mappings().first()
-            tenant_id = res["id"]
-        else:
-            tenant_id = row["id"]
-
-        # 11. Ensure default admin exists
-        admin_row = conn.execute(
-            text("SELECT id, is_default_admin FROM users WHERE tenant_id = :tenant_id AND email = :email"),
-            {"tenant_id": tenant_id, "email": settings.default_admin_email},
-        ).mappings().first()
-
-        if admin_row is None:
-            hashed_pwd = hash_password(settings.default_admin_password)
-            conn.execute(
-                text(
-                    f"""
-                    INSERT INTO users (tenant_id, email, hashed_password, role, is_default_admin, is_active)
-                    VALUES (:tenant_id, :email, :hashed_password, 'admin', {bool_true}, {bool_true})
-                    """
-                ),
-                {
-                    "tenant_id": tenant_id,
-                    "email": settings.default_admin_email,
-                    "hashed_password": hashed_pwd,
-                },
             )

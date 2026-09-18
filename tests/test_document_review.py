@@ -1,5 +1,6 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+from app.models import GeneratedDocument, Job
 from app.services.ats_validator import AtsValidationResult
 from app.services.claim_validator import ClaimValidationOutcome
 from app.services.document_review import (
@@ -10,22 +11,24 @@ from app.services.document_review import (
 from app.llm.schemas import ClaimCheckResult
 
 
-def _make_mock_engine():
-    mock_engine = MagicMock()
-    mock_conn = MagicMock()
-    mock_engine.begin.return_value.__enter__.return_value = mock_conn
-    return mock_engine, mock_conn
+async def test_record_validation_result_updates_the_document_row(db_session):
+    db_session.add(Job(
+        id=1, source="greenhouse", company="Acme", title="Engineer",
+        url="https://example.com", description="desc",
+    ))
+    db_session.add(GeneratedDocument(id=42, job_id=1, type="resume", version=1))
+    await db_session.commit()
+
+    await record_validation_result(document_id=42, claim_check_passed=True, ats_check_passed=False, session=db_session)
+
+    document = await db_session.get(GeneratedDocument, 42)
+    assert document.claim_check_passed is True
+    assert document.ats_check_passed is False
 
 
-def test_record_validation_result_executes_update_with_expected_params():
-    mock_engine, mock_conn = _make_mock_engine()
-
-    with patch("app.services.document_review.get_engine", return_value=mock_engine):
-        record_validation_result(document_id=42, claim_check_passed=True, ats_check_passed=False)
-
-    assert mock_conn.execute.called
-    _, params = mock_conn.execute.call_args[0]
-    assert params == {"claim_check_passed": True, "ats_check_passed": False, "document_id": 42}
+async def test_record_validation_result_no_ops_when_document_missing(db_session):
+    # Mirrors the old raw-SQL UPDATE's silent no-op on zero matched rows.
+    await record_validation_result(document_id=999, claim_check_passed=True, ats_check_passed=True, session=db_session)
 
 
 def test_document_review_result_ready_only_when_both_pass():
@@ -40,7 +43,7 @@ def test_document_review_result_ready_only_when_both_pass():
     assert not DocumentReviewResult(claim_check=claim_check, ats_check=ats_check_fail).ready_for_review
 
 
-def test_review_generated_document_runs_both_checks_and_records_result(tmp_path):
+async def test_review_generated_document_runs_both_checks_and_records_result(tmp_path):
     claim_outcome = ClaimValidationOutcome(
         passed=True,
         result=ClaimCheckResult(all_verified=True, items=[], blocking_claims=[]),
@@ -49,8 +52,8 @@ def test_review_generated_document_runs_both_checks_and_records_result(tmp_path)
 
     with patch("app.services.document_review.validate_claims", return_value=claim_outcome) as mock_claims, \
          patch("app.services.document_review.validate_ats", return_value=ats_outcome) as mock_ats, \
-         patch("app.services.document_review.record_validation_result") as mock_record:
-        result = review_generated_document(
+         patch("app.services.document_review.record_validation_result", AsyncMock()) as mock_record:
+        result = await review_generated_document(
             document_id=1,
             document_text="some text",
             docx_path="resume.docx",

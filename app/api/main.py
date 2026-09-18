@@ -4,23 +4,25 @@ Provides read-heavy routes for jobs, applications, and MCP exploration,
 plus full multi-tenant stateless JWT authentication and user administration.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import applications, auth, explore, jobs
+from app.api.routes import api_router
 from app.core.config import get_settings
 from app.core.database import get_engine, init_db
 from app.core.exceptions import (
-    AuthError,
     CareerOpsError,
     ConflictError,
     InvalidCredentialsError,
     NotFoundError,
     ProtectedAdminError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -36,10 +38,13 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     if settings.database_url:
         try:
-            init_db(get_engine())
+            await init_db(get_engine())
         except Exception:
-            # Tolerant of uninitialized database during test mocking
-            pass
+            # Don't crash the whole process over a startup-time DB hiccup
+            # (e.g. Postgres not up yet in a container's startup race) —
+            # but never swallow it silently; a real failure here means
+            # every route that touches the DB will fail too.
+            logger.exception("init_db() failed during startup")
     yield
 
 
@@ -109,7 +114,4 @@ async def careerops_error_handler(request: Request, exc: CareerOpsError) -> JSON
 
 
 # Register API Routers
-app.include_router(auth.router)
-app.include_router(jobs.router)
-app.include_router(applications.router)
-app.include_router(explore.router)
+app.include_router(api_router)

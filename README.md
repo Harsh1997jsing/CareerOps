@@ -19,10 +19,13 @@ source venv/bin/activate       # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# edit .env with your real ANTHROPIC_API_KEY
+# edit .env: ANTHROPIC_API_KEY, JWT_SECRET_KEY, DEFAULT_ADMIN_PASSWORD are
+# all required — the app fails fast at startup if any are unset (generate
+# a secret with: python -c "import secrets; print(secrets.token_urlsafe(48))")
 
 docker compose up -d          # starts Postgres
-psql postgresql://careerops:careerops@localhost:5432/careerops -f schema.sql
+alembic upgrade head          # applies migrations/ — app/models/ is the schema's
+                               # source of truth, this is how it reaches Postgres
 ```
 
 The ATS validator additionally needs [LibreOffice](https://www.libreoffice.org/)
@@ -95,11 +98,16 @@ for how they fit together, and rule 2 for what's deliberately excluded
 **1. Manual company targets** (Greenhouse / Lever public APIs, no auth needed):
 
 ```python
+import asyncio
+from app.core.database import get_session_factory
 from app.sources.targets import ingest_all
-from app.db import get_engine
 
 # edit data/companies.yaml with real board tokens / company slugs first
-inserted = ingest_all(get_engine())
+async def main():
+    async with get_session_factory()() as session:
+        return await ingest_all(session)
+
+inserted = asyncio.run(main())
 ```
 
 Or call a single board directly:
@@ -112,9 +120,10 @@ jobs = fetch_greenhouse_jobs(board_token="some-company", company="Some Company")
 # or: fetch_lever_jobs(company_slug="some-company", company="Some Company")
 ```
 
-Capped at 50 jobs per run per adapter. Pass an `engine` (see
-`app/db.py:get_engine()`) to `app.sources.common.insert_jobs(engine, jobs)`
-to dedupe and store them.
+Capped at 50 jobs per run per adapter. `fetch_jobs()` itself stays sync
+(plain `requests` calls); only the DB write is async. Pass an `AsyncSession`
+(see `app/core/database.py:get_session_factory()`) to
+`await app.sources.common.insert_jobs(session, jobs)` to dedupe and store them.
 
 **2. Multi-site scrape** (Glassdoor, Naukri, Indeed, ZipRecruiter, Google —
 via the `JobSpy` library; LinkedIn is hardcoded out of every call):
@@ -144,24 +153,34 @@ uvicorn app.api.main:app --reload
 
 The FastAPI REST API provides read-heavy endpoints for jobs, applications,
 and MCP exploration, complete multi-tenant stateless JWT authentication,
-and powers the React frontend interface.
-
+and powers the React frontend interface. Every route and every DB-touching
+service function is `async` (SQLAlchemy's async engine — `asyncpg` for
+Postgres, `aiosqlite` for a `sqlite:///` `DATABASE_URL`); see
+`memory/api.md` for the full endpoint inventory and `CLAUDE.md`'s
+Architecture section for how the async layer is wired.
 
 Backs `../frontend` (a React app — see its README, not yet scaffolded) over
-the 9 routes documented there: list/review jobs, approve/reject, open a
-posting, mark applied, and the MCP explore search. `GET /docs` has the live
-OpenAPI schema. CORS is open to `FRONTEND_ORIGIN` (`.env`, defaults to
-`http://localhost:5173`).
+17 routes: `/health` (unauthenticated), auth/login/users/tenants, list/review
+jobs (paginated), approve/reject, open a posting, mark applied, and the MCP
+explore search. Every route except `/health` and `/auth/login` requires a
+bearer token; `/auth/login` is rate limited (5 attempts / 5 min / client+email).
+`GET /docs` has the live OpenAPI schema. CORS is open to `FRONTEND_ORIGIN`
+(`.env`, defaults to `http://localhost:5173`).
 
 ## Marking an application as actually submitted
 
 After you've manually submitted an application in your own browser:
 
 ```python
+import asyncio
 from app.services.tracker import mark_applied
-from app.db import get_engine
+from app.core.database import get_session_factory
 
-mark_applied(get_engine(), application_id=1, job_id=1, company="Some Company", confirmed=True)
+async def main():
+    async with get_session_factory()() as session:
+        await mark_applied(session, application_id=1, job_id=1, company="Some Company", confirmed=True)
+
+asyncio.run(main())
 ```
 
 `confirmed=True` is required with no default — this is the only way
@@ -172,14 +191,19 @@ submits an application on your behalf.
 
 All 6 phases: hard filters + company cooldown, job scorer, resume/cover
 letter generation with a keyword-density guard, claim + ATS validation
-gating `generated_documents`, a Streamlit review dashboard, and
-manual-submit tracking — plus three ingestion source paths (manual
-Greenhouse/Lever targets, JobSpy multi-site scrape, MCP explore), a FastAPI
-layer (`app/api/`, 9 routes) for a separate frontend
-(`../frontend/README.md`, not yet scaffolded). 131 tests passing, 1 skipped
-pending a local LibreOffice install.
+gating `generated_documents`, and manual-submit tracking — plus three
+ingestion source paths (manual Greenhouse/Lever targets, JobSpy multi-site
+scrape, MCP explore), a real SQLAlchemy ORM (`app/models/`) with Alembic
+migrations, and an async FastAPI layer (`app/api/`, 17 routes incl.
+multi-tenant JWT auth, every route but `/health`/`/auth/login` requiring a
+bearer token — see `memory/api.md`'s "Backend audit fixes" section) for a
+separate frontend (`../frontend/README.md`, not yet scaffolded — there is
+currently no working review UI, see `memory/known-gaps.md`). 175 tests
+passing, 1 skipped pending a local LibreOffice install.
 
 See `memory/known-gaps.md` for what's genuinely still missing (mainly: an
 orchestrator to run the phases as one pipeline, real data in place of the
 placeholder YAML files, and verification against a live Postgres instance —
-`app/api/` included, its 16 tests mock the DB the same as everything else).
+every DB-touching test runs against a real aiosqlite in-memory session now,
+which is meaningfully stronger than mocking, but Postgres itself is still
+unverified).

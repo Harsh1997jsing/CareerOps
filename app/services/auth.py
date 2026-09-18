@@ -7,12 +7,8 @@ Implements:
 - Admin-only user provisioning within tenant boundaries.
 """
 
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Mapping
-
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import init_db
@@ -34,6 +30,8 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.models import Tenant, User
+from app.schemas import UserContext
 
 # Re-export for complete backward compatibility
 __all__ = [
@@ -69,131 +67,34 @@ __all__ = [
     "DEFAULT_TENANT_SLUG",
 ]
 
-# Settings-derived defaults
-settings = get_settings()
-DEFAULT_ADMIN_EMAIL = settings.default_admin_email
-DEFAULT_ADMIN_PASSWORD = settings.default_admin_password
-DEFAULT_TENANT_NAME = settings.default_tenant_name
-DEFAULT_TENANT_SLUG = settings.default_tenant_slug
+# Settings-derived defaults.
+_settings = get_settings()
+DEFAULT_ADMIN_EMAIL = _settings.default_admin_email
+DEFAULT_ADMIN_PASSWORD = _settings.default_admin_password
+DEFAULT_TENANT_NAME = _settings.default_tenant_name
+DEFAULT_TENANT_SLUG = _settings.default_tenant_slug
 
 
-# Data models
-@dataclass
-class Tenant:
-    """Tenant organization representation.
-
-    Attributes:
-        id: Primary key identifier.
-        name: Display name of the tenant organization.
-        slug: Unique URL and lookup slug.
-        is_active: Whether the tenant is enabled.
-        created_at: Creation timestamp.
-    """
-    id: int
-    name: str
-    slug: str
-    is_active: bool
-    created_at: datetime | None
-
-
-@dataclass
-class User:
-    """User account representation.
-
-    Attributes:
-        id: Primary key identifier.
-        tenant_id: ID of the tenant organization this user belongs to.
-        email: User's email address.
-        role: User role ('admin' or 'user').
-        is_default_admin: True if this is the protected default system admin.
-        is_active: Whether the account is active.
-        created_at: Account creation timestamp.
-    """
-    id: int
-    tenant_id: int
-    email: str
-    role: str
-    is_default_admin: bool
-    is_active: bool
-    created_at: datetime | None
-
-
-@dataclass
-class UserContext:
-    """Authenticated user context extracted from JWT claims.
-
-    Attributes:
-        user_id: Unique identifier of the authenticated user.
-        tenant_id: ID of the tenant organization.
-        tenant_slug: Slug of the tenant organization.
-        email: User's email address.
-        role: User role ('admin' or 'user').
-        is_default_admin: Whether user is the protected default administrator.
-    """
-    user_id: int
-    tenant_id: int
-    tenant_slug: str
-    email: str
-    role: str
-    is_default_admin: bool
-
-
-def init_auth_db(engine: Engine) -> None:
+async def init_auth_db(session: AsyncSession) -> None:
     """Bootstrap auth tables and seed the protected default admin user.
 
     Delegates to centralized database bootstrap in `app.core.database`.
 
     Args:
-        engine: SQLAlchemy Engine instance.
+        session: Async SQLAlchemy Session — only its bound AsyncEngine is
+            used (`session.bind`, not `get_bind()`, which returns the
+            internal sync-facing proxy AsyncSession wraps, not the actual
+            AsyncEngine), since init_db() manages its own session internally.
     """
-    init_db(engine)
-
-
-# Mapping helpers
-def _row_to_tenant(row: Mapping) -> Tenant:
-    """Map database row mapping onto a Tenant dataclass instance.
-
-    Args:
-        row: Database row mapping.
-
-    Returns:
-        Tenant: Mapped tenant instance.
-    """
-    return Tenant(
-        id=row["id"],
-        name=row["name"],
-        slug=row["slug"],
-        is_active=row["is_active"],
-        created_at=row.get("created_at"),
-    )
-
-
-def _row_to_user(row: Mapping) -> User:
-    """Map database row mapping onto a User dataclass instance.
-
-    Args:
-        row: Database row mapping.
-
-    Returns:
-        User: Mapped user instance.
-    """
-    return User(
-        id=row["id"],
-        tenant_id=row["tenant_id"],
-        email=row["email"],
-        role=row["role"],
-        is_default_admin=bool(row.get("is_default_admin")),
-        is_active=bool(row["is_active"]),
-        created_at=row.get("created_at"),
-    )
+    await init_db(session.bind)
 
 
 # Tenant Management
-def create_tenant(engine: Engine, name: str, slug: str) -> Tenant:
+async def create_tenant(session: AsyncSession, name: str, slug: str) -> Tenant:
     """Create a new tenant organization.
 
     Args:
-        engine: Database engine.
+        session: Database session.
         name: Organization display name.
         slug: Normalized identifier slug.
 
@@ -204,64 +105,34 @@ def create_tenant(engine: Engine, name: str, slug: str) -> Tenant:
         TenantAlreadyExistsError: If a tenant with the same slug already exists.
     """
     clean_slug = slug.strip().lower()
-    with engine.begin() as conn:
-        existing = conn.execute(
-            text("SELECT id FROM tenants WHERE slug = :slug"),
-            {"slug": clean_slug},
-        ).mappings().first()
-        if existing:
-            raise TenantAlreadyExistsError(f"Tenant slug '{clean_slug}' already exists")
+    if await session.scalar(select(Tenant).where(Tenant.slug == clean_slug)) is not None:
+        raise TenantAlreadyExistsError(f"Tenant slug '{clean_slug}' already exists")
 
-        row = conn.execute(
-            text("INSERT INTO tenants (name, slug) VALUES (:name, :slug) RETURNING id, name, slug, is_active, created_at"),
-            {"name": name.strip(), "slug": clean_slug},
-        ).mappings().first()
-
-    return _row_to_tenant(row)
+    tenant = Tenant(name=name.strip(), slug=clean_slug)
+    session.add(tenant)
+    await session.commit()
+    await session.refresh(tenant)
+    return tenant
 
 
-def get_tenant_by_id(engine: Engine, tenant_id: int) -> Tenant | None:
-    """Retrieve tenant by primary key ID.
-
-    Args:
-        engine: Database engine.
-        tenant_id: Tenant primary key ID.
-
-    Returns:
-        Tenant | None: Tenant instance or None if not found.
-    """
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT id, name, slug, is_active, created_at FROM tenants WHERE id = :id"),
-            {"id": tenant_id},
-        ).mappings().first()
-    return _row_to_tenant(row) if row else None
+async def get_tenant_by_id(session: AsyncSession, tenant_id: int) -> Tenant | None:
+    """Retrieve tenant by primary key ID."""
+    return await session.get(Tenant, tenant_id)
 
 
-def get_tenant_by_slug(engine: Engine, slug: str) -> Tenant | None:
-    """Retrieve tenant by URL slug.
-
-    Args:
-        engine: Database engine.
-        slug: Normalized tenant identifier slug.
-
-    Returns:
-        Tenant | None: Tenant instance or None if not found.
-    """
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT id, name, slug, is_active, created_at FROM tenants WHERE slug = :slug"),
-            {"slug": slug.strip().lower()},
-        ).mappings().first()
-    return _row_to_tenant(row) if row else None
+async def get_tenant_by_slug(session: AsyncSession, slug: str) -> Tenant | None:
+    """Retrieve tenant by URL slug."""
+    return await session.scalar(select(Tenant).where(Tenant.slug == slug.strip().lower()))
 
 
 # User Management
-def authenticate_user(engine: Engine, email: str, password: str, tenant_slug: str | None = None) -> UserContext:
+async def authenticate_user(
+    session: AsyncSession, email: str, password: str, tenant_slug: str | None = None
+) -> UserContext:
     """Authenticate a user by email, password, and tenant slug.
 
     Args:
-        engine: Database engine.
+        session: Database session.
         email: User email address.
         password: Raw password string.
         tenant_slug: Optional tenant slug (defaults to 'default').
@@ -275,44 +146,39 @@ def authenticate_user(engine: Engine, email: str, password: str, tenant_slug: st
     slug = (tenant_slug or DEFAULT_TENANT_SLUG).strip().lower()
     clean_email = email.strip().lower()
 
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT u.id, u.tenant_id, u.email, u.hashed_password, u.role,
-                       u.is_default_admin, u.is_active, t.slug as tenant_slug, t.is_active as tenant_active
-                FROM users u
-                JOIN tenants t ON t.id = u.tenant_id
-                WHERE LOWER(u.email) = :email AND t.slug = :slug
-                """
-            ),
-            {"email": clean_email, "slug": slug},
-        ).mappings().first()
+    tenant = await session.scalar(select(Tenant).where(Tenant.slug == slug))
+    user = None
+    if tenant is not None:
+        user = await session.scalar(
+            select(User).where(User.tenant_id == tenant.id, User.email == clean_email)
+        )
 
-    if row is None:
+    if tenant is None or user is None:
         raise InvalidCredentialsError("Invalid email, password, or tenant")
 
-    if not row["is_active"] or not row["tenant_active"]:
+    if not user.is_active or not tenant.is_active:
         raise InvalidCredentialsError("User account or tenant is inactive")
 
-    if not verify_password(password, row["hashed_password"]):
+    if not verify_password(password, user.hashed_password):
         raise InvalidCredentialsError("Invalid email, password, or tenant")
 
     return UserContext(
-        user_id=row["id"],
-        tenant_id=row["tenant_id"],
-        tenant_slug=row["tenant_slug"],
-        email=row["email"],
-        role=row["role"],
-        is_default_admin=bool(row.get("is_default_admin")),
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        tenant_slug=tenant.slug,
+        email=user.email,
+        role=user.role,
+        is_default_admin=user.is_default_admin,
     )
 
 
-def create_user(engine: Engine, tenant_id: int, email: str, password: str, role: str = "user") -> User:
+async def create_user(
+    session: AsyncSession, tenant_id: int, email: str, password: str, role: str = "user"
+) -> User:
     """Create a new user within a specific tenant organization.
 
     Args:
-        engine: Database engine.
+        session: Database session.
         tenant_id: ID of the tenant organization.
         email: New user's email address.
         password: Raw password to hash and store.
@@ -330,84 +196,44 @@ def create_user(engine: Engine, tenant_id: int, email: str, password: str, role:
     if clean_role not in ("admin", "user"):
         raise ValueError("Role must be 'admin' or 'user'")
 
-    hashed_pwd = hash_password(password)
+    existing = await session.scalar(
+        select(User).where(User.tenant_id == tenant_id, User.email == clean_email)
+    )
+    if existing is not None:
+        raise UserAlreadyExistsError(f"User with email '{clean_email}' already exists in tenant")
 
-    with engine.begin() as conn:
-        existing = conn.execute(
-            text("SELECT id FROM users WHERE tenant_id = :tenant_id AND LOWER(email) = :email"),
-            {"tenant_id": tenant_id, "email": clean_email},
-        ).mappings().first()
-
-        if existing:
-            raise UserAlreadyExistsError(f"User with email '{clean_email}' already exists in tenant")
-
-        row = conn.execute(
-            text(
-                """
-                INSERT INTO users (tenant_id, email, hashed_password, role, is_default_admin, is_active)
-                VALUES (:tenant_id, :email, :hashed_password, :role, false, true)
-                RETURNING id, tenant_id, email, role, is_default_admin, is_active, created_at
-                """
-            ),
-            {
-                "tenant_id": tenant_id,
-                "email": clean_email,
-                "hashed_password": hashed_pwd,
-                "role": clean_role,
-            },
-        ).mappings().first()
-
-    return _row_to_user(row)
+    user = User(
+        tenant_id=tenant_id,
+        email=clean_email,
+        hashed_password=hash_password(password),
+        role=clean_role,
+        is_default_admin=False,
+        is_active=True,
+    )
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return user
 
 
-def get_user_by_id(engine: Engine, user_id: int) -> User | None:
-    """Retrieve user by primary key ID.
-
-    Args:
-        engine: Database engine.
-        user_id: User primary key.
-
-    Returns:
-        User | None: User instance or None if not found.
-    """
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT id, tenant_id, email, role, is_default_admin, is_active, created_at FROM users WHERE id = :id"),
-            {"id": user_id},
-        ).mappings().first()
-    return _row_to_user(row) if row else None
+async def get_user_by_id(session: AsyncSession, user_id: int) -> User | None:
+    """Retrieve user by primary key ID."""
+    return await session.get(User, user_id)
 
 
-def list_users(engine: Engine, tenant_id: int) -> list[User]:
-    """List all users within a given tenant organization.
-
-    Args:
-        engine: Database engine.
-        tenant_id: Tenant primary key ID.
-
-    Returns:
-        list[User]: List of User instances in the tenant.
-    """
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT id, tenant_id, email, role, is_default_admin, is_active, created_at
-                FROM users WHERE tenant_id = :tenant_id ORDER BY id ASC
-                """
-            ),
-            {"tenant_id": tenant_id},
-        ).mappings().all()
-    return [_row_to_user(row) for row in rows]
+async def list_users(session: AsyncSession, tenant_id: int) -> list[User]:
+    """List all users within a given tenant organization, ordered by id."""
+    stmt = select(User).where(User.tenant_id == tenant_id).order_by(User.id)
+    return list((await session.scalars(stmt)).all())
 
 
-def delete_user(engine: Engine, tenant_id: int, user_id: int) -> bool:
+async def delete_user(session: AsyncSession, tenant_id: int, user_id: int) -> bool:
     """Delete a user from a tenant organization.
 
     Enforces the critical protection rule: the default admin user CANNOT be deleted.
 
     Args:
-        engine: Database engine.
+        session: Database session.
         tenant_id: Tenant organization ID.
         user_id: User ID to delete.
 
@@ -417,20 +243,13 @@ def delete_user(engine: Engine, tenant_id: int, user_id: int) -> bool:
     Raises:
         ProtectedAdminError: If the target user is the protected default admin.
     """
-    with engine.begin() as conn:
-        user_row = conn.execute(
-            text("SELECT id, is_default_admin FROM users WHERE id = :id AND tenant_id = :tenant_id"),
-            {"id": user_id, "tenant_id": tenant_id},
-        ).mappings().first()
+    user = await session.scalar(select(User).where(User.id == user_id, User.tenant_id == tenant_id))
+    if user is None:
+        return False
 
-        if user_row is None:
-            return False
+    if user.is_default_admin:
+        raise ProtectedAdminError("The default administrator user is protected and cannot be deleted")
 
-        if user_row["is_default_admin"]:
-            raise ProtectedAdminError("The default administrator user is protected and cannot be deleted")
-
-        result = conn.execute(
-            text("DELETE FROM users WHERE id = :id AND tenant_id = :tenant_id"),
-            {"id": user_id, "tenant_id": tenant_id},
-        )
-        return result.rowcount > 0
+    await session.delete(user)
+    await session.commit()
+    return True

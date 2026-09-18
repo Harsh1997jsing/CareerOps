@@ -1,5 +1,6 @@
-from unittest.mock import MagicMock
+from sqlalchemy import func, select
 
+from app.models import Job
 from app.sources.common import (
     description_hash,
     insert_jobs,
@@ -64,30 +65,35 @@ JOB = {
 }
 
 
-def test_insert_jobs_returns_zero_for_empty_list():
-    mock_engine = MagicMock()
-    assert insert_jobs(mock_engine, []) == 0
-    mock_engine.begin.assert_not_called()
+async def _job_count(session):
+    return await session.scalar(select(func.count()).select_from(Job))
 
 
-def test_insert_jobs_sums_rowcount_across_jobs():
-    mock_engine = MagicMock()
-    mock_conn = MagicMock()
-    mock_engine.begin.return_value.__enter__.return_value = mock_conn
-    mock_conn.execute.return_value.rowcount = 1
+async def test_insert_jobs_returns_zero_for_empty_list(db_session):
+    assert await insert_jobs(db_session, []) == 0
+    assert await _job_count(db_session) == 0
 
-    inserted = insert_jobs(mock_engine, [JOB, {**JOB, "description_hash": "hash2"}])
+
+async def test_insert_jobs_inserts_each_new_job(db_session):
+    inserted = await insert_jobs(db_session, [JOB, {**JOB, "description_hash": "hash2"}])
 
     assert inserted == 2
-    assert mock_conn.execute.call_count == 2
+    assert await _job_count(db_session) == 2
 
 
-def test_insert_jobs_counts_duplicates_as_zero_rowcount():
-    mock_engine = MagicMock()
-    mock_conn = MagicMock()
-    mock_engine.begin.return_value.__enter__.return_value = mock_conn
-    mock_conn.execute.return_value.rowcount = 0  # ON CONFLICT DO NOTHING skipped it
+async def test_insert_jobs_skips_a_duplicate_description_hash(db_session):
+    await insert_jobs(db_session, [JOB])
 
-    inserted = insert_jobs(mock_engine, [JOB])
+    inserted = await insert_jobs(db_session, [JOB])  # same description_hash again
 
     assert inserted == 0
+    assert await _job_count(db_session) == 1
+
+
+async def test_insert_jobs_inserts_the_rest_of_the_batch_around_a_duplicate(db_session):
+    await insert_jobs(db_session, [JOB])
+
+    inserted = await insert_jobs(db_session, [JOB, {**JOB, "description_hash": "hash2"}])
+
+    assert inserted == 1
+    assert await _job_count(db_session) == 2

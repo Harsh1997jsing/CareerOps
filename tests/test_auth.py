@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.services.auth import (
     DEFAULT_ADMIN_EMAIL,
@@ -32,11 +32,13 @@ from app.services.auth import (
 
 
 @pytest.fixture
-def test_engine():
+async def test_session():
     """Create an isolated in-memory SQLite database initialized with auth schema and seed admin."""
-    engine = create_engine("sqlite:///:memory:")
-    init_auth_db(engine)
-    return engine
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session = async_sessionmaker(bind=engine, expire_on_commit=False)()
+    await init_auth_db(session)
+    yield session
+    await engine.dispose()
 
 
 def test_hash_and_verify_password():
@@ -80,14 +82,14 @@ def test_invalid_token_raises_invalid_token_error():
         decode_access_token("this.is.not.a.valid.jwt")
 
 
-def test_seed_default_admin(test_engine):
+async def test_seed_default_admin(test_session):
     """Verify init_auth_db creates the default tenant and protected default admin."""
-    tenant = get_tenant_by_slug(test_engine, DEFAULT_TENANT_SLUG)
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
     assert tenant is not None
     assert tenant.slug == DEFAULT_TENANT_SLUG
 
-    admin_ctx = authenticate_user(
-        test_engine,
+    admin_ctx = await authenticate_user(
+        test_session,
         email=DEFAULT_ADMIN_EMAIL,
         password=DEFAULT_ADMIN_PASSWORD,
         tenant_slug=DEFAULT_TENANT_SLUG,
@@ -97,22 +99,22 @@ def test_seed_default_admin(test_engine):
     assert admin_ctx.is_default_admin is True
 
 
-def test_authenticate_user_invalid_credentials(test_engine):
+async def test_authenticate_user_invalid_credentials(test_session):
     """Verify invalid password or non-existent user raises InvalidCredentialsError."""
     with pytest.raises(InvalidCredentialsError):
-        authenticate_user(test_engine, email=DEFAULT_ADMIN_EMAIL, password="incorrect_password")
+        await authenticate_user(test_session, email=DEFAULT_ADMIN_EMAIL, password="incorrect_password")
 
     with pytest.raises(InvalidCredentialsError):
-        authenticate_user(test_engine, email="ghost@example.com", password="any_password")
+        await authenticate_user(test_session, email="ghost@example.com", password="any_password")
 
 
-def test_create_user_in_tenant(test_engine):
+async def test_create_user_in_tenant(test_session):
     """Verify an admin can create a user within a tenant and list all users."""
-    tenant = get_tenant_by_slug(test_engine, DEFAULT_TENANT_SLUG)
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
     assert tenant is not None
 
-    user = create_user(
-        test_engine,
+    user = await create_user(
+        test_session,
         tenant_id=tenant.id,
         email="developer@careerops.local",
         password="securedevpassword",
@@ -123,31 +125,31 @@ def test_create_user_in_tenant(test_engine):
     assert user.role == "user"
     assert user.is_default_admin is False
 
-    users = list_users(test_engine, tenant_id=tenant.id)
+    users = await list_users(test_session, tenant_id=tenant.id)
     assert len(users) == 2
     emails = [u.email for u in users]
     assert DEFAULT_ADMIN_EMAIL in emails
     assert "developer@careerops.local" in emails
 
 
-def test_create_user_duplicate_email_raises_error(test_engine):
+async def test_create_user_duplicate_email_raises_error(test_session):
     """Verify attempting to create a user with an existing email in a tenant raises UserAlreadyExistsError."""
-    tenant = get_tenant_by_slug(test_engine, DEFAULT_TENANT_SLUG)
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
     with pytest.raises(UserAlreadyExistsError):
-        create_user(
-            test_engine,
+        await create_user(
+            test_session,
             tenant_id=tenant.id,
             email=DEFAULT_ADMIN_EMAIL,
             password="newpassword",
         )
 
 
-def test_create_user_invalid_role_raises_value_error(test_engine):
+async def test_create_user_invalid_role_raises_value_error(test_session):
     """Verify invalid user roles raise a ValueError."""
-    tenant = get_tenant_by_slug(test_engine, DEFAULT_TENANT_SLUG)
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
     with pytest.raises(ValueError):
-        create_user(
-            test_engine,
+        await create_user(
+            test_session,
             tenant_id=tenant.id,
             email="invalidrole@example.com",
             password="password",
@@ -155,61 +157,61 @@ def test_create_user_invalid_role_raises_value_error(test_engine):
         )
 
 
-def test_default_admin_cannot_be_deleted(test_engine):
+async def test_default_admin_cannot_be_deleted(test_session):
     """CRITICAL SECURITY TEST: Verify the protected default admin can never be deleted."""
-    tenant = get_tenant_by_slug(test_engine, DEFAULT_TENANT_SLUG)
-    users = list_users(test_engine, tenant_id=tenant.id)
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
+    users = await list_users(test_session, tenant_id=tenant.id)
     default_admin = next(u for u in users if u.is_default_admin)
 
     with pytest.raises(ProtectedAdminError) as exc_info:
-        delete_user(test_engine, tenant_id=tenant.id, user_id=default_admin.id)
+        await delete_user(test_session, tenant_id=tenant.id, user_id=default_admin.id)
 
     assert "protected and cannot be deleted" in str(exc_info.value)
 
     # Verify admin still exists in the database
-    persisted_admin = get_user_by_id(test_engine, default_admin.id)
+    persisted_admin = await get_user_by_id(test_session, default_admin.id)
     assert persisted_admin is not None
     assert persisted_admin.id == default_admin.id
 
 
-def test_delete_regular_user(test_engine):
+async def test_delete_regular_user(test_session):
     """Verify normal non-default-admin users can be deleted successfully."""
-    tenant = get_tenant_by_slug(test_engine, DEFAULT_TENANT_SLUG)
-    user = create_user(
-        test_engine,
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
+    user = await create_user(
+        test_session,
         tenant_id=tenant.id,
         email="temp_user@example.com",
         password="temppassword",
     )
 
-    deleted = delete_user(test_engine, tenant_id=tenant.id, user_id=user.id)
+    deleted = await delete_user(test_session, tenant_id=tenant.id, user_id=user.id)
     assert deleted is True
 
     # User no longer exists
-    assert get_user_by_id(test_engine, user.id) is None
+    assert await get_user_by_id(test_session, user.id) is None
 
 
-def test_delete_nonexistent_user(test_engine):
+async def test_delete_nonexistent_user(test_session):
     """Verify deleting a nonexistent user returns False without errors."""
-    tenant = get_tenant_by_slug(test_engine, DEFAULT_TENANT_SLUG)
-    deleted = delete_user(test_engine, tenant_id=tenant.id, user_id=99999)
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
+    deleted = await delete_user(test_session, tenant_id=tenant.id, user_id=99999)
     assert deleted is False
 
 
-def test_create_and_retrieve_tenant(test_engine):
+async def test_create_and_retrieve_tenant(test_session):
     """Verify tenant creation, uniqueness enforcement, and lookup functions."""
-    tenant = create_tenant(test_engine, name="Acme Corp", slug="acme")
+    tenant = await create_tenant(test_session, name="Acme Corp", slug="acme")
     assert tenant.id is not None
     assert tenant.name == "Acme Corp"
     assert tenant.slug == "acme"
 
-    by_id = get_tenant_by_id(test_engine, tenant.id)
+    by_id = await get_tenant_by_id(test_session, tenant.id)
     assert by_id is not None
     assert by_id.slug == "acme"
 
-    by_slug = get_tenant_by_slug(test_engine, "acme")
+    by_slug = await get_tenant_by_slug(test_session, "acme")
     assert by_slug is not None
     assert by_slug.id == tenant.id
 
     with pytest.raises(TenantAlreadyExistsError):
-        create_tenant(test_engine, name="Acme Clone", slug="acme")
+        await create_tenant(test_session, name="Acme Clone", slug="acme")

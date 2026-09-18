@@ -3,9 +3,20 @@ HTTP request/response shapes for app/api routes — distinct from
 app/llm/schemas.py, which is LLM output shapes. Keeping them separate
 means an LLM schema change (job_scorer's prompt, say) can't silently
 change what the frontend receives over the wire.
+
+Timestamp fields are typed `datetime | str | None`, not `str | None`:
+routes build these directly from ORM/domain objects via
+`Out.model_validate(obj, from_attributes=True)`, and pydantic only
+serializes a `datetime` to an ISO 8601 string in the JSON response when
+the field's declared type actually accepts one — a `str`-only field
+raises a validation error on a real `datetime` value instead of
+formatting it. The `| str` half covers domain objects that already pass
+a pre-formatted string.
 """
 
-from pydantic import BaseModel
+from datetime import datetime
+
+from pydantic import BaseModel, Field
 
 
 class ApplicationOut(BaseModel):
@@ -14,11 +25,11 @@ class ApplicationOut(BaseModel):
     Attributes:
         application_id: Primary key of the application.
         status: Application workflow status (e.g., 'READY_FOR_REVIEW', 'APPROVED', 'APPLIED').
-        applied_at: ISO 8601 formatted timestamp when human manually submitted, if applied.
+        applied_at: Timestamp when human manually submitted, if applied.
     """
     application_id: int
     status: str
-    applied_at: str | None
+    applied_at: datetime | str | None
 
 
 class JobListItemOut(BaseModel):
@@ -202,7 +213,7 @@ class UserOut(BaseModel):
     role: str
     is_default_admin: bool
     is_active: bool
-    created_at: str | None = None
+    created_at: datetime | str | None = None
 
 
 class UserCreateRequest(BaseModel):
@@ -210,11 +221,12 @@ class UserCreateRequest(BaseModel):
 
     Attributes:
         email: New user's email address.
-        password: Initial password.
+        password: Initial password (min 8 characters — audit finding F7,
+            previously unvalidated).
         role: User role ('user' or 'admin', defaults to 'user').
     """
     email: str
-    password: str
+    password: str = Field(min_length=8)
     role: str = "user"
 
 
@@ -223,10 +235,13 @@ class TenantCreateRequest(BaseModel):
 
     Attributes:
         name: Organization display name.
-        slug: Normalized identifier slug.
+        slug: Normalized identifier slug — lowercase letters, digits, and
+            hyphens only (audit finding F7, previously unvalidated: any
+            string, including spaces/uppercase, was accepted and merely
+            lowercased, not rejected).
     """
     name: str
-    slug: str
+    slug: str = Field(min_length=1, max_length=63, pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
 class TenantOut(BaseModel):
@@ -243,5 +258,5 @@ class TenantOut(BaseModel):
     name: str
     slug: str
     is_active: bool
-    created_at: str | None = None
+    created_at: datetime | str | None = None
 

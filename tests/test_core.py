@@ -1,10 +1,10 @@
 """Unit tests for centralized app.core modules (config, database, security, exceptions)."""
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core import (
     ApplicationNotConfirmedError,
@@ -97,24 +97,21 @@ def test_core_exceptions_hierarchy():
     assert isinstance(err, CareerOpsError)
 
 
-def test_core_database_init_and_health():
+async def test_core_database_init_and_health():
     """Verify core database initialization, table creation, and ping health check."""
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
     # Ping before init
-    assert check_database_health(engine) is True
+    assert await check_database_health(engine) is True
 
     # Bootstrap tables and seed admin
-    init_db(engine)
+    await init_db(engine)
 
     # Verify session generator
-    from unittest.mock import patch
-
     with patch("app.core.database.get_engine", return_value=engine):
         db_gen = get_db()
-        session = next(db_gen)
+        session = await anext(db_gen)
         assert session is not None
-        session.close()
+        await session.close()
+
+    await engine.dispose()

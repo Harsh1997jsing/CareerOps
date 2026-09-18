@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 from app.sources.targets import fetch_all_targets, ingest_all, load_company_targets
 
@@ -49,11 +49,11 @@ def test_fetch_all_targets_skips_a_failing_target_without_aborting():
     assert jobs == [LEVER_JOB]
 
 
-def test_ingest_all_inserts_fetched_jobs():
-    mock_engine = MagicMock()
+async def test_ingest_all_inserts_fetched_jobs():
+    mock_session = MagicMock()
     with patch("app.sources.targets.fetch_all_targets", return_value=[GH_JOB, LEVER_JOB]), \
-         patch("app.sources.targets.insert_jobs", return_value=2) as mock_insert:
-        inserted = ingest_all(mock_engine)
+         patch("app.sources.targets.insert_jobs", AsyncMock(return_value=2)) as mock_insert:
+        inserted = await ingest_all(mock_session)
 
     assert inserted == 2
-    mock_insert.assert_called_once_with(mock_engine, [GH_JOB, LEVER_JOB])
+    mock_insert.assert_called_once_with(mock_session, [GH_JOB, LEVER_JOB])
