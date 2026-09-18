@@ -17,120 +17,32 @@ APPROVED_STATUS = "APPROVED"
 REJECTED_STATUS = "REJECTED"
 
 
-@dataclass
-class JobListItem:
-    """Summary of a job posting along with its latest fit analysis.
+from app.schemas import (
+    ApplicationContext,
+    ApplicationItem,
+    GeneratedDocumentItem,
+    JobDetail,
+    JobListItem,
+)
 
-    Attributes:
-        job_id: Database primary key of the job.
-        company: Company name.
-        title: Position title.
-        location: Normalized location string.
-        url: Direct link to posting.
-        status: Job status (e.g. 'READY_FOR_REVIEW', 'APPROVED', 'REJECT').
-        fit_score: Match score (0-100) or None if not analyzed yet.
-        confidence: Assessment confidence ('high', 'medium', 'low', or None).
-        strong_matches: List of verified candidate qualifications matching the role.
-        missing_skills: List of required skills missing from candidate evidence.
-        risks: Identified concerns or experience gaps.
-    """
-    job_id: int
-    company: str
-    title: str
-    location: str
-    url: str
-    status: str
-    fit_score: int | None
-    confidence: str | None
-    strong_matches: list
-    missing_skills: list
-    risks: list
-
-
-@dataclass
-class ApplicationItem:
-    """Application record associated with a job.
-
-    Attributes:
-        application_id: Application primary key.
-        job_id: Associated job identifier.
-        status: Current review status (e.g. 'READY_FOR_REVIEW', 'APPROVED', 'APPLIED').
-        applied_at: Timestamp when human user confirmed application submission.
-    """
-    application_id: int
-    job_id: int
-    status: str
-    applied_at: datetime | None
-
-
-@dataclass
-class GeneratedDocumentItem:
-    """Metadata for a generated resume or cover letter.
-
-    Attributes:
-        id: Primary key of the document record.
-        type: Document type ('resume' or 'cover_letter').
-        file_path: Filesystem path to the generated DOCX.
-        version: Version iteration number for this job and type.
-        claim_check_passed: Fact-checking verification status against evidence.
-        ats_check_passed: ATS format and text fidelity validation status.
-    """
-    id: int
-    type: str
-    file_path: str
-    version: int
-    claim_check_passed: bool | None
-    ats_check_passed: bool | None
-
-
-@dataclass
-class JobDetail:
-    """Comprehensive job details including full description and application status.
-
-    Attributes:
-        job_id: Unique database identifier of the job.
-        company: Company / employer name.
-        title: Job title.
-        location: Job location.
-        url: Link to the external posting.
-        description: Full job description text.
-        status: Job pipeline status.
-        fit_score: LLM fit score (0-100).
-        confidence: Assessment confidence.
-        strong_matches: Verified matching skills.
-        missing_skills: Unmatched requirements.
-        risks: Identified risks or red flags.
-        application: Linked ApplicationItem if an application row exists.
-    """
-    job_id: int
-    company: str
-    title: str
-    location: str
-    url: str
-    description: str
-    status: str
-    fit_score: int | None
-    confidence: str | None
-    strong_matches: list
-    missing_skills: list
-    risks: list
-    application: "ApplicationItem | None"
-
-
-@dataclass
-class ApplicationContext:
-    """Minimal context needed to open a job URL or record manual submission.
-
-    Attributes:
-        application_id: Identifier of the application.
-        job_id: Identifier of the corresponding job.
-        company: Company name for cooldown tracking.
-        url: Job posting URL to open in browser.
-    """
-    application_id: int
-    job_id: int
-    company: str
-    url: str
+__all__ = [
+    "APPROVED_STATUS",
+    "REJECTED_STATUS",
+    "JobListItem",
+    "ApplicationItem",
+    "GeneratedDocumentItem",
+    "JobDetail",
+    "ApplicationContext",
+    "list_jobs",
+    "get_job",
+    "list_generated_documents",
+    "approve_application",
+    "reject_application",
+    "get_application_context",
+    "get_application_for_job",
+    "check_cooldown_for_company",
+    "get_company_applied_dates",
+]
 
 
 def _row_to_job_list_item(row: Mapping) -> JobListItem:

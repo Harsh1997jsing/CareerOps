@@ -3,19 +3,9 @@ Deterministic filters applied before a job ever reaches Claude.
 Cheaper and more reliable than asking an LLM to check hard constraints.
 """
 
-from dataclasses import dataclass
+from app.schemas import FilterResult
 
-
-@dataclass
-class FilterResult:
-    """Outcome of evaluating deterministic filter rules against a job posting.
-
-    Attributes:
-        passed: True if the job satisfied all criteria.
-        reasons: List of explanatory violation messages if the check failed.
-    """
-    passed: bool
-    reasons: list[str]
+__all__ = ["FilterResult", "check_hard_filters", "check_company_cooldown"]
 
 
 def check_hard_filters(job: dict, constraints: dict) -> FilterResult:
