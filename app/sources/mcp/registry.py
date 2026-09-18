@@ -17,11 +17,19 @@ class McpSource:
     Attributes:
         name: Short identifier for the source (e.g. 'jobo', 'hasdata').
         url: Remote endpoint URL of the streamable HTTP MCP server.
-        api_key: Bearer token secret for authentication, or None if unconfigured.
+        api_key: Secret for authentication, or None if unconfigured.
+        auth_header: Header name the key is sent in. "Authorization" sends
+            it as "Bearer <key>"; any other name sends the raw key as that
+            header's value verbatim (e.g. HasData's "x-api-key" — confirmed
+            by hand against the live server: its gateway accepts an
+            Authorization: Bearer header for list_tools/initialize, but a
+            real tools/call only succeeds with x-api-key; Bearer gets a 401
+            from HasData's own downstream API at execution time).
     """
     name: str
     url: str
     api_key: str | None
+    auth_header: str = "Authorization"
 
 
 def configured_sources() -> list[McpSource]:
@@ -44,6 +52,7 @@ def configured_sources() -> list[McpSource]:
             name="hasdata",
             url=settings.hasdata_mcp_url,
             api_key=settings.hasdata_mcp_api_key or None,
+            auth_header="x-api-key",
         ),
     ]
     return [source for source in candidates if source.api_key and source.url]

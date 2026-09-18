@@ -6,6 +6,7 @@ plus full multi-tenant stateless JWT authentication and user administration.
 
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,6 +49,32 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def _cors_origins(frontend_origin: str) -> list[str]:
+    """Expand a configured frontend origin to cover its localhost/127.0.0.1 twin.
+
+    The browser treats "http://localhost:5173" and "http://127.0.0.1:5173"
+    as different origins even though they're the same dev server — whichever
+    one a user happens to type/click gets silently CORS-blocked if only the
+    other is allow-listed. `allow_origins` can't use a wildcard here since
+    `allow_credentials=True` is set (the CORS spec forbids combining `*`
+    with credentialed requests), so both concrete variants are listed
+    instead of trying to make one env var cover both forms itself.
+
+    Args:
+        frontend_origin: The configured FRONTEND_ORIGIN value.
+
+    Returns:
+        list[str]: `[frontend_origin]`, plus its localhost/127.0.0.1 twin if
+            its hostname is one of those two.
+    """
+    parsed = urlparse(frontend_origin)
+    if parsed.hostname not in ("localhost", "127.0.0.1"):
+        return [frontend_origin]
+    port = f":{parsed.port}" if parsed.port else ""
+    twin_host = "127.0.0.1" if parsed.hostname == "localhost" else "localhost"
+    return [frontend_origin, f"{parsed.scheme}://{twin_host}{port}"]
+
+
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
@@ -59,7 +86,7 @@ app = FastAPI(
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=_cors_origins(settings.frontend_origin),
     allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
     allow_headers=["*"],
     allow_credentials=True,

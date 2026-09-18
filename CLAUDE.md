@@ -56,18 +56,29 @@ written for:
 
 ## Setup and commands
 
-```bash
-python3.12 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+Fully Dockerized (frontend + API + Postgres + pgAdmin + migrations, one
+command — see `README.md`'s "Running with Docker" for the full reference):
 
+```bash
 cp .env.example .env             # then fill in ANTHROPIC_API_KEY, JWT_SECRET_KEY,
                                   # DEFAULT_ADMIN_PASSWORD (all required — the app
                                   # fails fast at startup if any are unset)
                                   # (JOBO_MCP_API_KEY/HASDATA_* are optional — only needed for Explore)
 
-docker compose up -d             # starts Postgres
-alembic upgrade head             # applies migrations/ — the schema's source of truth
+docker compose up -d --build     # db healthy -> migrate (alembic upgrade head, one-off) ->
+                                  # api healthy -> frontend; restart: unless-stopped on all four
+```
+
+Or locally, against a Dockerized Postgres:
+
+```bash
+python3.12 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+docker compose up -d db pgadmin migrate   # migrate applies migrations/ then exits — the
+                                           # schema's source of truth is app/models/
+uvicorn app.api.main:app --reload
 ```
 
 Run the full test suite (no API key needed — every LLM/DB call is mocked):
@@ -84,11 +95,6 @@ pytest tests/test_hard_filters.py::test_fails_on_disallowed_location -v
 One test (`test_full_ats_roundtrip_with_real_libreoffice` in
 `tests/test_ats_validator.py`) is skipped unless LibreOffice (`soffice`) is
 on PATH — install it to actually exercise the DOCX→PDF round-trip.
-
-Run the dashboard (needs `DATABASE_URL` reachable — see Postgres setup above):
-```bash
-streamlit run app/dashboard.py
-```
 
 There is no lint/format command configured yet.
 
@@ -131,11 +137,21 @@ not generated:
      Glassdoor, Naukri, Indeed, ZipRecruiter, and Google Jobs.
      `ALLOWED_SITES` hardcodes LinkedIn out of every call.
    - `app/sources/mcp/` — live, on-demand search against MCP job-search
-     servers (JOBO, Indeed/HasData; configured via `registry.py`'s env
-     vars) for the frontend's Explore page. `capabilities.py` inspects each
-     server's actual `list_tools()` response rather than assuming a fixed
-     schema, and `explore.py` fans a query out to every capable source in
-     parallel, skipping ones that error or lack a search tool. Explore
+     servers (JOBO, HasData; configured via `registry.py`'s env vars) for
+     the frontend's Explore page. `capabilities.py` inspects each server's
+     actual `list_tools()` response rather than assuming a fixed schema —
+     restricted to tools whose own text mentions "job" first, since a
+     general-purpose scraping platform (HasData: 63 tools) otherwise gets
+     matched against unrelated tools (Airbnb, etc.) by keyword alone.
+     `explore.py` fans a query out to every capable source in parallel,
+     skipping ones that error or lack a search tool. **HasData is verified
+     working against live data** (real Glassdoor/Indeed jobs); it
+     authenticates via `x-api-key`, not `Authorization: Bearer`
+     (`McpSource.auth_header` — its gateway accepts Bearer for listing
+     tools but rejects it at actual tool-call time). **Jobo cannot work
+     with a static API key at all** — its MCP server requires a real OAuth
+     2.1 browser-consent flow this backend doesn't implement; it's skipped
+     with a logged warning rather than failing the whole search. Explore
      results are **not** auto-inserted into `jobs` — only a future
      `/explore/{id}/save` endpoint does that, same dedup path as the other
      two sources.
@@ -155,9 +171,10 @@ not generated:
    `generated_documents.claim_check_passed`/`ats_check_passed`.
 6. `app/api/` (FastAPI, `uvicorn app.api.main:app --reload`) — the only
    review surface now; the Streamlit dashboard (`app/dashboard.py`) was
-   removed, and `../frontend` (a React app meant to replace it) hasn't been
-   scaffolded yet, so there is currently no working UI — see
-   `memory/known-gaps.md`. `app/services/jobs.py` (list_jobs, get_job,
+   removed in favor of `../CareerOps-frontend` (React + Vite + TypeScript),
+   which is scaffolded with a Dashboard (real `GET /jobs` data) and Explore
+   page, though approve/reject and document-review UI don't exist yet —
+   see `memory/known-gaps.md`. `app/services/jobs.py` (list_jobs, get_job,
    list_generated_documents) and `app/services/applications.py`
    (get_application_context, approve/reject_application,
    check_cooldown_for_company) are its DB layer — split by resource, not one
@@ -226,11 +243,3 @@ job.py`) refer to the same concept under different names. Nothing
 currently writes a `JobFitAnalysis` into a `JobAnalysis` row, so this hasn't
 caused a bug yet — but whoever adds that write path needs to map one to the
 other explicitly. See `memory/known-gaps.md`.
-
-## Known repo quirk
-
-There is a stray, empty directory in the repo root literally named
-`{app/api,app/services,app/llm,app/sources,app/models,data,tests,documents,generated}`
-— the artifact of a `mkdir {a,b,c}` brace-expansion that was run in a shell without
-brace expansion support. It is not part of the project structure; don't create files
-inside it.

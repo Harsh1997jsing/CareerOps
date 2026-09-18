@@ -93,17 +93,29 @@ def build_capability_matrix(tools: list[Tool]) -> CapabilityMatrix:
     """
     tool_texts = [(tool, _tool_text(tool)) for tool in tools]
 
+    # A dedicated job-search MCP server (Jobo) only exposes job tools, so
+    # every tool is fair game. A general-purpose scraping platform (HasData:
+    # 63 tools spanning Airbnb, Zillow, etc.) is not — matching "search"
+    # against its full tool list picks up e.g. an Airbnb listing tool
+    # (its description also says "Searches Airbnb for..."), which then gets
+    # called with job-search arguments and fails. Restrict to tools whose
+    # own text mentions "job" first; only fall back to the unfiltered set
+    # if that leaves nothing (a Jobo-like server with no literal "job" in
+    # its tool text would otherwise report zero capabilities).
+    job_tool_texts = [(tool, text) for tool, text in tool_texts if "job" in text]
+    candidate_texts = job_tool_texts or tool_texts
+
     flags = {
-        capability: any(_matches(text, keywords) for _, text in tool_texts)
+        capability: any(_matches(text, keywords) for _, text in candidate_texts)
         for capability, keywords in CAPABILITY_KEYWORDS.items()
     }
 
     search_tool = next(
-        (tool for tool, text in tool_texts if _matches(text, CAPABILITY_KEYWORDS["search"])),
+        (tool for tool, text in candidate_texts if _matches(text, CAPABILITY_KEYWORDS["search"])),
         None,
     )
     details_tool = next(
-        (tool for tool, text in tool_texts if _matches(text, CAPABILITY_KEYWORDS["details"])),
+        (tool for tool, text in candidate_texts if _matches(text, CAPABILITY_KEYWORDS["details"])),
         None,
     )
 

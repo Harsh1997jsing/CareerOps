@@ -1,5 +1,11 @@
 # Phase 4: Streamlit dashboard
 
+**Superseded.** `app/dashboard.py` and `app/services/dashboard_data.py`
+described below were deleted in favor of `app/api/` (FastAPI) plus
+`../CareerOps-frontend` (React) — see `README.md`'s "What's built" and
+`api.md`. Kept here for the decisions/reasoning, not as a description of
+what exists in the repo today.
+
 ## What's there
 
 - `app/services/dashboard_data.py` — all DB access for the dashboard, kept

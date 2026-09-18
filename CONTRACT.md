@@ -12,9 +12,8 @@ here:
 2. Make the matching edit in `../CareerOps-frontend/CONTRACT.md` — same
    endpoint, same fields, same version number.
 3. Bump `Contract version`.
-4. If the frontend already has TypeScript types / an API client (it
-   doesn't yet — still just a README, see `../CareerOps-frontend/README.md`),
-   update those before merging, not after.
+4. Update the frontend's TypeScript types (`../CareerOps-frontend/src/types/api.ts`)
+   and API client (`../CareerOps-frontend/src/api/*.ts`) before merging, not after.
 
 This file is a snapshot for quick cross-checking, not a replacement for
 reading the real source when in doubt: `app/api/schemas.py` (exact

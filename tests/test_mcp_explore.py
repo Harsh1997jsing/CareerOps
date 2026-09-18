@@ -92,7 +92,11 @@ async def test_search_source_calls_detected_tool_with_mapped_arguments():
     assert len(jobs) == 1
     assert jobs[0]["source"] == "jobo"
     mock_call.assert_called_once_with(
-        JOBO.url, JOBO.api_key, "search_jobs", {"query": "backend engineer", "location": "Bangalore"}
+        JOBO.url,
+        JOBO.api_key,
+        "search_jobs",
+        {"query": "backend engineer", "location": "Bangalore"},
+        JOBO.auth_header,
     )
 
 

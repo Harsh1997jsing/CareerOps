@@ -1,14 +1,99 @@
 services:
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: careerops
       POSTGRES_USER: careerops
       POSTGRES_PASSWORD: careerops
     ports:
-      - "5432:5432"
+      # host 5433 -> container 5432: a native PostgreSQL service already
+      # occupies host port 5432 on this machine
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U careerops -d careerops"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@careerops.dev
+      PGADMIN_DEFAULT_PASSWORD: careerops
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # One-off container: applies migrations, then exits. A distinct step from
+  # api's own startup command (see Dockerfile's comment on why migrations
+  # are never baked into `api`'s CMD) — this just automates running that
+  # step before `api` starts, instead of requiring the manual
+  # `docker compose run --rm api alembic upgrade head` every time. Safe
+  # here specifically because local dev docker-compose is single-replica;
+  # this is not how a real multi-replica deployment should trigger
+  # migrations.
+  migrate:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://careerops:careerops@db:5432/careerops
+    command: alembic upgrade head
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # overrides .env's localhost DATABASE_URL — inside the compose
+      # network the db is reachable as host "db" on its container port
+      DATABASE_URL: postgresql://careerops:careerops@db:5432/careerops
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # python, not curl — python:3.12-slim doesn't have curl installed
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build: ../CareerOps-frontend
+    restart: unless-stopped
+    environment:
+      # read by the browser, not this container, so it stays the
+      # host-mapped address — the api's own container hostname ("api")
+      # would be unreachable from outside Docker's network
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../CareerOps-frontend:/app
+      - /app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:
+  pgadmin_data:
