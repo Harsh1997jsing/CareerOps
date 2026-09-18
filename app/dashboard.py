@@ -29,16 +29,42 @@ STATUS_OPTIONS = ["All", "DISCOVERED", "REVIEW_REQUIRED", "READY_FOR_REVIEW", "R
 
 
 def load_constraints(path: str = CONSTRAINTS_PATH) -> dict:
+    """Load candidate constraints from a YAML file.
+
+    Args:
+        path: Filepath to the constraints YAML file (defaults to `data/constraints.yaml`).
+
+    Returns:
+        dict: Parsed constraints dictionary containing allowed locations,
+            cooldown periods, excluded keywords, etc.
+    """
     with open(path) as f:
         return yaml.safe_load(f)
 
 
 def load_evidence_yaml(path: str = EVIDENCE_PATH) -> str:
+    """Read candidate evidence YAML file as raw text.
+
+    Args:
+        path: Filepath to the evidence YAML file (defaults to `data/evidence.yaml`).
+
+    Returns:
+        str: Raw text contents of the candidate's evidence file.
+    """
     with open(path) as f:
         return f.read()
 
 
 def read_docx_text(file_path: str) -> str:
+    """Extract plain text from all paragraphs of a DOCX file.
+
+    Args:
+        file_path: Absolute or relative filesystem path to the DOCX file.
+
+    Returns:
+        str: Extracted document paragraphs joined by newlines, or a not-found
+            message if the file does not exist.
+    """
     if not os.path.exists(file_path):
         return f"(file not found: {file_path})"
     document = Document(file_path)
@@ -46,6 +72,17 @@ def read_docx_text(file_path: str) -> str:
 
 
 def render_job(engine, job, cooldown_days: int) -> None:
+    """Render a single job's interactive review card in the Streamlit UI.
+
+    Displays fit scores, match summaries, missing skills, risks, company cooldown
+    warnings, generated documents (with side-by-side evidence preview), and approval
+    or rejection buttons.
+
+    Args:
+        engine: SQLAlchemy Engine instance for database access.
+        job: JobListItem instance containing details and analysis results for the job.
+        cooldown_days: Number of days required between applications to the same company.
+    """
     with st.expander(f"{job.company} — {job.title}", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
@@ -109,6 +146,13 @@ def render_job(engine, job, cooldown_days: int) -> None:
 
 
 def main() -> None:
+    """Run the CareerOps Streamlit review dashboard application.
+
+    Initializes the wide layout dashboard, loads candidate constraints to
+    retrieve company cooldown policies, presents status filter controls, and
+    queries and renders matching jobs along with their generated documents
+    and human decision approval buttons.
+    """
     st.set_page_config(page_title="CareerOps", layout="wide")
     st.title("CareerOps")
 

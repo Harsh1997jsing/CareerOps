@@ -19,20 +19,39 @@ class ApplicationNotConfirmedError(RuntimeError):
 
 
 def open_job_url(url: str) -> None:
-    """Opens the job posting in your default browser so you can apply yourself."""
+    """Open the job posting in the user's default browser for manual review and submission.
+
+    Strictly obeys CLAUDE.md rule 1 by only opening the posting in a browser tab.
+    Does not automate form-filling or submission.
+
+    Args:
+        url: External application or posting URL.
+    """
     webbrowser.open(url)
 
 
 def mark_applied(engine: Engine, application_id: int, job_id: int, company: str,
                   confirmed: bool, applied_at: datetime | None = None) -> None:
-    """
-    Records that an application was submitted: sets applications.status to
-    APPLIED and upserts company_application_history in one transaction, so
-    the cooldown tracker is never out of sync with an application's status.
+    """Record that an application was manually submitted by the human user.
+
+    Sets applications.status to APPLIED and upserts company_application_history
+    in one transaction, so the cooldown tracker is never out of sync with an
+    application's status.
 
     `confirmed` has no default — the caller must pass True explicitly, and
     only after the human has actually clicked submit themselves. Anything
-    else raises rather than silently proceeding.
+    else raises rather than silently proceeding (CLAUDE.md rule 5).
+
+    Args:
+        engine: Database engine instance.
+        application_id: Application primary key.
+        job_id: Corresponding job primary key.
+        company: Company name for cooldown logging.
+        confirmed: Mandatory explicit confirmation that human submitted the application.
+        applied_at: Optional submission timestamp (defaults to current time).
+
+    Raises:
+        ApplicationNotConfirmedError: If `confirmed` is False.
     """
     if not confirmed:
         raise ApplicationNotConfirmedError(

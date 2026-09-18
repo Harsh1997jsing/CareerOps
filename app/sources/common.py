@@ -38,21 +38,48 @@ EMPLOYMENT_TYPE_ALIASES = {
 
 
 def strip_html(html: str) -> str:
+    """Remove HTML tags from raw string content, preserving inner text.
+
+    Args:
+        html: Raw HTML string or None.
+
+    Returns:
+        str: Plain text with HTML tags replaced by spaces and excess whitespace trimmed.
+    """
     return re.sub(r"<[^>]+>", " ", html or "").strip()
 
 
 def description_hash(description: str) -> str:
+    """Compute deterministic SHA-256 hash of a normalized job description.
+
+    Normalizes whitespace and converts text to lowercase before hashing, ensuring
+    identical postings with minor spacing differences produce identical hashes
+    for deduplication in the database.
+
+    Args:
+        description: Job description text.
+
+    Returns:
+        str: Hexadecimal SHA-256 digest string.
+    """
     normalized = " ".join((description or "").split()).lower()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def normalize_location(raw_location: str) -> str:
-    """
+    """Map free-text location strings onto canonical constraint names.
+
     Maps free-text location strings from job-board APIs onto the canonical
     names used in data/constraints.yaml's allowed_locations, so
     hard_filters can match on them directly. Anything unrecognized passes
     through unchanged — it will simply fail the location filter rather
     than silently matching something it shouldn't.
+
+    Args:
+        raw_location: Unformatted location string from API.
+
+    Returns:
+        str: Canonical location alias or trimmed original string.
     """
     lowered = (raw_location or "").lower()
     for keyword, canonical in LOCATION_ALIASES.items():
@@ -62,17 +89,33 @@ def normalize_location(raw_location: str) -> str:
 
 
 def normalize_employment_type(raw_type: str | None) -> str | None:
+    """Normalize raw employment type onto canonical allowed options.
+
+    Args:
+        raw_type: Raw commitment or job type string (e.g. 'fulltime', 'part-time').
+
+    Returns:
+        str | None: Canonical employment type (e.g. 'Full-time', 'Contract') or None.
+    """
     if not raw_type:
         return None
     return EMPLOYMENT_TYPE_ALIASES.get(raw_type.strip().lower(), raw_type.strip())
 
 
 def insert_jobs(engine: Engine, jobs: list[dict]) -> int:
-    """
+    """Insert normalized jobs into the database, skipping duplicates.
+
     Inserts normalized jobs one at a time, skipping any whose
     description_hash already exists (relies on the UNIQUE constraint on
     jobs.description_hash in schema.sql). Returns the number of rows
     actually inserted (i.e. excluding duplicates).
+
+    Args:
+        engine: Database engine instance.
+        jobs: List of normalized job dictionaries.
+
+    Returns:
+        int: Number of new rows inserted.
     """
     if not jobs:
         return 0

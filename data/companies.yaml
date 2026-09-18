@@ -1,0 +1,17 @@
+# Manual company targets for app/sources/targets.py's ingest_all().
+# Each entry needs the board token / company slug from the company's own
+# careers URL — nothing here is discovered automatically.
+#
+# Greenhouse: the slug in boards.greenhouse.io/<board_token>
+# Lever:      the slug in jobs.lever.co/<company_slug>
+#
+# Still placeholder values — replace with real targets before running
+# ingestion.
+
+greenhouse:
+  - board_token: example-co
+    company: Example Co
+
+lever:
+  - company_slug: example-co
+    company: Example Co

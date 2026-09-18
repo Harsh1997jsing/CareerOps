@@ -22,13 +22,28 @@ from app.services.docx_writer import SECTION_TITLES
 
 @dataclass
 class AtsValidationResult:
+    """Outcome of ATS format or text round-trip validation.
+
+    Attributes:
+        passed: True if document satisfies all ATS compatibility criteria.
+        reasons: Explanations of any validation failures or missing content.
+    """
     passed: bool
     reasons: list[str] = field(default_factory=list)
 
 
 def _column_count(section) -> int:
-    # python-docx has no public API for column count; w:cols lives on the
-    # section's sectPr XML, absent entirely for the (default) single-column case.
+    """Extract the column count of a Word document section.
+
+    python-docx has no public API for column count; w:cols lives on the
+    section's sectPr XML, absent entirely for the (default) single-column case.
+
+    Args:
+        section: A python-docx Section object.
+
+    Returns:
+        int: Number of columns configured in the section (defaults to 1).
+    """
     cols = section._sectPr.find(qn("w:cols"))
     if cols is None:
         return 1
@@ -37,7 +52,17 @@ def _column_count(section) -> int:
 
 
 def check_docx_structure(docx_path: str) -> AtsValidationResult:
-    """Confirms the DOCX itself has no ATS-hostile elements."""
+    """Confirm the DOCX itself has no ATS-hostile elements.
+
+    Inspects the DOCX to verify that it does not contain tables, inline shapes/images,
+    text boxes, or multi-column page sections.
+
+    Args:
+        docx_path: Path to the DOCX file to inspect.
+
+    Returns:
+        AtsValidationResult: Result indicating pass/fail and listing any offending elements.
+    """
     document = Document(docx_path)
     reasons = []
 
@@ -61,7 +86,20 @@ def check_docx_structure(docx_path: str) -> AtsValidationResult:
 
 
 def convert_docx_to_pdf(docx_path: str, output_dir: str) -> str:
-    """Converts via LibreOffice headless. Requires `soffice` on PATH."""
+    """Convert a DOCX file to PDF via LibreOffice headless.
+
+    Requires `soffice` or `libreoffice` on PATH.
+
+    Args:
+        docx_path: Path to the source DOCX file.
+        output_dir: Directory where the converted PDF should be written.
+
+    Returns:
+        str: Absolute or relative filepath of the created PDF.
+
+    Raises:
+        RuntimeError: If LibreOffice is not installed on PATH or fails to produce output.
+    """
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         raise RuntimeError(
@@ -83,19 +121,45 @@ def convert_docx_to_pdf(docx_path: str, output_dir: str) -> str:
 
 
 def extract_pdf_text(pdf_path: str) -> str:
+    """Extract plain text from all pages of a PDF using PyMuPDF.
+
+    Args:
+        pdf_path: Path to the PDF file.
+
+    Returns:
+        str: Extracted text joined by newlines.
+    """
     with pymupdf.open(pdf_path) as doc:
         return "\n".join(page.get_text() for page in doc)
 
 
 def _normalize(text: str) -> str:
+    """Normalize text by collapsing whitespace and converting to lowercase.
+
+    Args:
+        text: Raw text string.
+
+    Returns:
+        str: Lowercased string with consecutive whitespace collapsed into single spaces.
+    """
     return " ".join(text.split()).lower()
 
 
 def check_text_roundtrip(source_text: str, extracted_text: str,
                           required_snippets: list[str]) -> AtsValidationResult:
-    """
-    Confirms nothing was lost or garbled going DOCX -> PDF -> text, and that
-    the required snippets (section headings, contact info) survived intact.
+    """Confirm text fidelity through the DOCX -> PDF -> text round-trip.
+
+    Confirms nothing was lost or garbled going DOCX -> PDF -> text, that
+    the required snippets (section headings, contact info) survived intact,
+    and that no more than 10% of source vocabulary was lost.
+
+    Args:
+        source_text: Original plain text before document creation.
+        extracted_text: Text extracted back out of the generated PDF.
+        required_snippets: Substrings (headings, contact details) that must exist.
+
+    Returns:
+        AtsValidationResult: Result with failure reasons if snippets or words are missing.
     """
     reasons = []
     normalized_extracted = _normalize(extracted_text)
@@ -115,7 +179,20 @@ def check_text_roundtrip(source_text: str, extracted_text: str,
 
 def validate_ats(docx_path: str, source_text: str, required_snippets: list[str],
                   workdir: str) -> AtsValidationResult:
-    """Full pipeline: structure check first (cheap, no subprocess), then the PDF round-trip."""
+    """Execute full ATS validation: structural check followed by PDF round-trip check.
+
+    Structure check runs first (cheap, no subprocess). If structural checks pass,
+    converts to PDF via headless LibreOffice and verifies text round-trip extraction.
+
+    Args:
+        docx_path: Path to the generated DOCX file.
+        source_text: Ground-truth text content of the document.
+        required_snippets: Crucial strings (e.g. name, email, headings) that must survive.
+        workdir: Directory for intermediate PDF conversion artifacts.
+
+    Returns:
+        AtsValidationResult: Overall ATS validation outcome.
+    """
     structure_result = check_docx_structure(docx_path)
     if not structure_result.passed:
         return structure_result
@@ -126,10 +203,28 @@ def validate_ats(docx_path: str, source_text: str, required_snippets: list[str],
 
 
 def resume_required_snippets(profile: dict, sections: list[GeneratedResumeSection]) -> list[str]:
+    """Compute mandatory text snippets that must be present in an ATS-parsed resume.
+
+    Args:
+        profile: Candidate profile dictionary containing 'name', 'email', etc.
+        sections: List of generated resume sections.
+
+    Returns:
+        list[str]: Non-empty list of required snippets including candidate name, email,
+            and section headings.
+    """
     snippets = [profile.get("name", ""), profile.get("email", "")]
     snippets += [SECTION_TITLES.get(s.section, s.section.title()) for s in sections]
     return [s for s in snippets if s]
 
 
 def cover_letter_required_snippets(profile: dict) -> list[str]:
+    """Compute mandatory text snippets that must be present in an ATS-parsed cover letter.
+
+    Args:
+        profile: Candidate profile dictionary containing 'name' and 'email'.
+
+    Returns:
+        list[str]: Non-empty list of required snippets (candidate name and email).
+    """
     return [s for s in [profile.get("name", ""), profile.get("email", "")] if s]

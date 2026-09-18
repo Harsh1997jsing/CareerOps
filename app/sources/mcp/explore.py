@@ -1,0 +1,251 @@
+"""
+Live MCP job search backing the frontend's Explore page (see
+frontend/README.md). Results here are never inserted into `jobs`
+automatically — only a future /explore/{id}/save endpoint does that, via
+the same insert_jobs() dedup path every other source uses. A source that
+errors, times out, or lacks a search tool is skipped, never fatal to the
+whole search — see CAPABILITY DETECTION in the original spec and
+CLAUDE.md rule 2 (no LinkedIn/Naukri MCP connector, ever).
+"""
+
+import asyncio
+import json
+import logging
+
+from app.sources.common import (
+    description_hash,
+    normalize_employment_type,
+    normalize_location,
+    strip_html,
+)
+from app.sources.mcp.capabilities import CapabilityMatrix, build_capability_matrix
+from app.sources.mcp.client import call_tool, list_tools
+from app.sources.mcp.registry import McpSource, configured_sources
+
+logger = logging.getLogger(__name__)
+
+# Common keys a tool's JSON payload might nest its result list under.
+RESULT_LIST_KEYS = ("results", "jobs", "items", "data")
+
+
+async def get_capability_matrix(source: McpSource) -> CapabilityMatrix:
+    """Retrieve advertised tools and build a capability matrix for a single MCP source.
+
+    Args:
+        source: McpSource configuration object with URL and API key.
+
+    Returns:
+        CapabilityMatrix: Discovered capability flags and assigned search tools.
+    """
+    tools = await list_tools(source.url, source.api_key)
+    return build_capability_matrix(tools)
+
+
+async def get_all_capabilities() -> dict[str, CapabilityMatrix]:
+    """Retrieve capability matrices for all configured MCP sources in parallel.
+
+    Backs GET /explore/capabilities. Checks every configured source in
+    parallel; a source whose capability check fails is omitted rather
+    than raising, since the frontend treats "absent" the same as
+    "unsupported" when disabling filters per source.
+
+    Returns:
+        dict[str, CapabilityMatrix]: Map of source name to its CapabilityMatrix.
+    """
+    sources = configured_sources()
+    outcomes = await asyncio.gather(
+        *(get_capability_matrix(source) for source in sources),
+        return_exceptions=True,
+    )
+
+    matrix: dict[str, CapabilityMatrix] = {}
+    for source, outcome in zip(sources, outcomes):
+        if isinstance(outcome, Exception):
+            logger.warning("capability check failed for %s: %s", source.name, outcome)
+            continue
+        matrix[source.name] = outcome
+    return matrix
+
+
+def _first_present(input_schema: dict, candidates: tuple[str, ...]) -> str | None:
+    """Find the first matching candidate property name in an input schema.
+
+    Args:
+        input_schema: JSON Schema dictionary for tool parameters.
+        candidates: Preferred property names in priority order.
+
+    Returns:
+        str | None: First candidate key found in schema properties, or None.
+    """
+    properties = (input_schema or {}).get("properties", {})
+    return next((name for name in candidates if name in properties), None)
+
+
+def _build_search_arguments(tool, query: str, filters: dict) -> dict:
+    """Map search query and filter dictionary onto tool's input schema parameters.
+
+    Args:
+        tool: Selected Tool definition for the server's search operation.
+        query: Free-text search string.
+        filters: Filter key-value pairs (location, remote, company, etc.).
+
+    Returns:
+        dict: Mapped argument dictionary matching the tool's parameter names.
+    """
+    schema = tool.input_schema or {}
+    arguments: dict = {}
+
+    query_param = _first_present(schema, ("query", "search_term", "keywords", "q", "title"))
+    if query_param:
+        arguments[query_param] = query
+
+    filter_params = {
+        "location": ("location", "city", "region"),
+        "company": ("company", "employer"),
+        "employment_type": ("employment_type", "job_type", "commitment"),
+        "remote": ("remote", "is_remote", "work_model"),
+        "experience": ("experience", "seniority", "years"),
+        "skills": ("skills", "skill"),
+        "posted_within_days": ("hours_old", "posted_within_days", "date_posted"),
+    }
+    for filter_key, candidates in filter_params.items():
+        if filter_key not in filters:
+            continue
+        param_name = _first_present(schema, candidates)
+        if param_name:
+            arguments[param_name] = filters[filter_key]
+
+    return arguments
+
+
+def normalize_result(source_name: str, raw: dict) -> dict:
+    """Normalize raw job dictionary from an MCP tool invocation into standard schema.
+
+    Args:
+        source_name: Name of the originating MCP connector.
+        raw: Raw job dict extracted from the MCP tool output.
+
+    Returns:
+        dict: Normalized job dictionary ready for Explore presentation or DB persistence.
+    """
+    description = strip_html(raw.get("description") or raw.get("summary") or "")
+    url = raw.get("apply_url") or raw.get("url") or raw.get("job_url") or raw.get("link") or ""
+
+    return {
+        "source": source_name,
+        "source_job_id": str(raw.get("id") or raw.get("job_id") or description_hash(url or description)[:16]),
+        "company": (raw.get("company") or raw.get("employer") or "").strip(),
+        "title": (raw.get("title") or raw.get("job_title") or "").strip(),
+        "location": normalize_location(raw.get("location") or ""),
+        "url": url,
+        "description": description,
+        "description_hash": description_hash(description),
+        "employment_type": normalize_employment_type(raw.get("employment_type") or raw.get("job_type")),
+        # Each MCP server formats dates differently and this hasn't been
+        # observed against a live response yet — left unparsed rather than
+        # guessing a format; fill in once JOBO/HasData's real shape is known.
+        "posted_at": None,
+        "salary_min": raw.get("salary_min"),
+        "salary_max": raw.get("salary_max"),
+    }
+
+
+def _extract_results(call_result) -> list[dict]:
+    """Extract list of raw job dictionaries from an MCP CallToolResult.
+
+    Prefers `structured_content` (present when the server declares an
+    output schema); falls back to parsing JSON out of the text content
+    blocks. Gives up to an empty list rather than guessing at a shape
+    that isn't there.
+
+    Args:
+        call_result: CallToolResult returned from client.call_tool().
+
+    Returns:
+        list[dict]: Extracted job dictionaries.
+    """
+    payload = call_result.structured_content
+    if payload is not None:
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in RESULT_LIST_KEYS:
+                if isinstance(payload.get(key), list):
+                    return payload[key]
+        return []
+
+    results: list[dict] = []
+    for block in call_result.content or []:
+        text = getattr(block, "text", None)
+        if not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list):
+            results.extend(parsed)
+        elif isinstance(parsed, dict):
+            for key in RESULT_LIST_KEYS:
+                if isinstance(parsed.get(key), list):
+                    results.extend(parsed[key])
+    return results
+
+
+async def search_source(source: McpSource, query: str, filters: dict) -> list[dict]:
+    """Search a single MCP source connector and normalize its responses.
+
+    Args:
+        source: Target McpSource configuration.
+        query: Query string.
+        filters: Filter criteria dictionary.
+
+    Returns:
+        list[dict]: Normalized job postings, or empty list if source fails or has no search tool.
+    """
+    tools = await list_tools(source.url, source.api_key)
+    matrix = build_capability_matrix(tools)
+    if matrix.search_tool is None:
+        logger.warning("%s exposes no recognizable search tool; skipping", source.name)
+        return []
+
+    arguments = _build_search_arguments(matrix.search_tool, query, filters)
+    call_result = await call_tool(source.url, source.api_key, matrix.search_tool.name, arguments)
+    if call_result.is_error:
+        logger.warning("%s search returned an error: %s", source.name, call_result.content)
+        return []
+
+    return [normalize_result(source.name, raw) for raw in _extract_results(call_result)]
+
+
+async def search(query: str, filters: dict | None = None) -> list[dict]:
+    """Fan out search query to all configured, search-capable MCP sources in parallel.
+
+    Fans `query` out to every configured, search-capable MCP source in
+    parallel (backs POST /explore/search). A source that errors, times
+    out, or turns out not to support search is skipped, not fatal.
+
+    Args:
+        query: User search query or keywords.
+        filters: Optional dictionary of filter options.
+
+    Returns:
+        list[dict]: Aggregated list of normalized job results.
+    """
+    filters = filters or {}
+    sources = configured_sources()
+    if not sources:
+        return []
+
+    outcomes = await asyncio.gather(
+        *(search_source(source, query, filters) for source in sources),
+        return_exceptions=True,
+    )
+
+    results: list[dict] = []
+    for source, outcome in zip(sources, outcomes):
+        if isinstance(outcome, Exception):
+            logger.warning("%s search failed: %s", source.name, outcome)
+            continue
+        results.extend(outcome)
+    return results

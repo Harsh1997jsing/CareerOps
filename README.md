@@ -86,7 +86,23 @@ print(cover_letter.word_count, cover_letter.word_count_warning)
 write_cover_letter_docx(profile, cover_letter.content, "generated/cover_letter.docx")
 ```
 
-## Try job ingestion (Greenhouse / Lever public APIs, no auth needed)
+## Try job ingestion
+
+Three independent source paths — see `CLAUDE.md`'s Architecture section
+for how they fit together, and rule 2 for what's deliberately excluded
+(LinkedIn, in any form, from all three).
+
+**1. Manual company targets** (Greenhouse / Lever public APIs, no auth needed):
+
+```python
+from app.sources.targets import ingest_all
+from app.db import get_engine
+
+# edit data/companies.yaml with real board tokens / company slugs first
+inserted = ingest_all(get_engine())
+```
+
+Or call a single board directly:
 
 ```python
 from app.sources.greenhouse import fetch_jobs as fetch_greenhouse_jobs
@@ -96,8 +112,29 @@ jobs = fetch_greenhouse_jobs(board_token="some-company", company="Some Company")
 # or: fetch_lever_jobs(company_slug="some-company", company="Some Company")
 ```
 
-Capped at 50 jobs per run. Pass an `engine` (see `app/db.py:get_engine()`)
-to `app.sources.common.insert_jobs(engine, jobs)` to dedupe and store them.
+Capped at 50 jobs per run per adapter. Pass an `engine` (see
+`app/db.py:get_engine()`) to `app.sources.common.insert_jobs(engine, jobs)`
+to dedupe and store them.
+
+**2. Multi-site scrape** (Glassdoor, Naukri, Indeed, ZipRecruiter, Google —
+via the `JobSpy` library; LinkedIn is hardcoded out of every call):
+
+```python
+from app.sources.jobspy_source import fetch_jobs
+
+jobs = fetch_jobs(search_term="backend engineer", location="Bangalore")
+```
+
+**3. MCP explore** (live search against JOBO / Indeed-HasData, for the
+frontend's Explore page — needs `JOBO_MCP_API_KEY`/`HASDATA_*` set in
+`.env`; not persisted to `jobs` unless explicitly saved):
+
+```python
+import asyncio
+from app.sources.mcp.explore import search
+
+jobs = asyncio.run(search("backend engineer", {"location": "Bangalore"}))
+```
 
 ## Run the dashboard (needs Postgres reachable via `DATABASE_URL`)
 
@@ -109,6 +146,18 @@ Lists jobs with fit score/confidence/matches/gaps, previews generated
 documents next to `data/evidence.yaml`, warns on company cooldown, and lets
 you Approve/Reject. Approve marks an application `APPROVED` for your
 review — it does **not** submit anything or mark it `APPLIED`.
+
+## Run the API (needs Postgres reachable via `DATABASE_URL`)
+
+```bash
+uvicorn app.api.main:app --reload
+```
+
+Backs `../frontend` (a React app — see its README, not yet scaffolded) over
+the 9 routes documented there: list/review jobs, approve/reject, open a
+posting, mark applied, and the MCP explore search. `GET /docs` has the live
+OpenAPI schema. CORS is open to `FRONTEND_ORIGIN` (`.env`, defaults to
+`http://localhost:5173`).
 
 ## Marking an application as actually submitted
 
@@ -129,10 +178,14 @@ submits an application on your behalf.
 
 All 6 phases: hard filters + company cooldown, job scorer, resume/cover
 letter generation with a keyword-density guard, claim + ATS validation
-gating `generated_documents`, a Streamlit review dashboard, Greenhouse/Lever
-ingestion, and manual-submit tracking. 81 tests passing, 1 skipped pending
-a local LibreOffice install.
+gating `generated_documents`, a Streamlit review dashboard, and
+manual-submit tracking — plus three ingestion source paths (manual
+Greenhouse/Lever targets, JobSpy multi-site scrape, MCP explore), a FastAPI
+layer (`app/api/`, 9 routes) for a separate frontend
+(`../frontend/README.md`, not yet scaffolded). 131 tests passing, 1 skipped
+pending a local LibreOffice install.
 
 See `memory/known-gaps.md` for what's genuinely still missing (mainly: an
 orchestrator to run the phases as one pipeline, real data in place of the
-placeholder YAML files, and verification against a live Postgres instance).
+placeholder YAML files, and verification against a live Postgres instance —
+`app/api/` included, its 16 tests mock the DB the same as everything else).

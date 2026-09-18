@@ -1,3 +1,16 @@
+"""Prompt templates for Claude LLM calls across the CareerOps pipeline.
+
+Contains prompt templates for:
+- `JOB_FIT_ANALYSIS_PROMPT`: Evaluates job postings against candidate skills,
+  evidence, and constraints.
+- `RESUME_SECTION_PROMPT`: Drafts targeted resume sections grounded in candidate
+  evidence entries without inventing claims or echoing job descriptions verbatim.
+- `COVER_LETTER_PROMPT`: Generates cover letters reflecting candidate voice samples
+  and evidence.
+- `CLAIM_CHECK_PROMPT`: Fact-checks generated documents strictly against candidate
+  evidence IDs to block unsupported claims.
+"""
+
 JOB_FIT_ANALYSIS_PROMPT = """You are analyzing whether a candidate is a good fit for a job.
 Only use information given below. Never invent skills, experience, or metrics
 that are not present in the candidate's evidence.

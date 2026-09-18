@@ -9,6 +9,23 @@ from app.llm.prompts import JOB_FIT_ANALYSIS_PROMPT
 
 
 def score_job(job_description: str, skills_path: str, evidence_path: str, constraints_path: str) -> JobFitAnalysis:
+    """Evaluate candidate fit for a job using Claude and structured schema output.
+
+    Loads candidate skills, evidence, and constraints, populating the job fit prompt.
+    Returns honest assessment of matches, missing requirements, risks, and fit score.
+
+    Args:
+        job_description: Full text description of the job posting.
+        skills_path: Path to candidate skills YAML file.
+        evidence_path: Path to candidate evidence YAML file.
+        constraints_path: Path to candidate constraints YAML file.
+
+    Returns:
+        JobFitAnalysis: Structured analysis with score, confidence, matches, and gaps.
+
+    Raises:
+        OSError: If any of the YAML files cannot be read.
+    """
     with open(skills_path) as f:
         skills_yaml = f.read()
     with open(evidence_path) as f:
@@ -28,8 +45,18 @@ def score_job(job_description: str, skills_path: str, evidence_path: str, constr
 
 
 def decide(analysis: JobFitAnalysis) -> str:
-    """
-    Replaces a single fixed threshold with a fit + confidence + risk decision.
+    """Determine the next application workflow status based on LLM fit analysis.
+
+    Replaces a single fixed threshold with a fit + confidence + risk decision:
+    - 'REJECT': Candidate is ineligible.
+    - 'READY_FOR_REVIEW': Fit score >= 75 with high/medium confidence and zero risks.
+    - 'REVIEW_REQUIRED': Low confidence, any risks present, or moderate fit scores.
+
+    Args:
+        analysis: JobFitAnalysis instance containing scoring metrics and risks.
+
+    Returns:
+        str: Status string ('REJECT', 'READY_FOR_REVIEW', or 'REVIEW_REQUIRED').
     """
     if not analysis.eligible:
         return "REJECT"

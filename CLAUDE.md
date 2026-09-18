@@ -21,11 +21,23 @@ written for:
    platform.** Every application ends at "ready for human review" — the user
    clicks submit themselves. `app/services/tracker.py`'s `open_job_url()`
    only opens a browser tab; it never fills in or submits a form.
-2. **Never write browser automation that spoofs fingerprints, evades bot
-   detection, or scrapes LinkedIn.** Job ingestion (`app/sources/`) only
-   calls public, unauthenticated job-board JSON APIs (Greenhouse, Lever). If
-   a source needs more than its public API, flag it instead of building
-   around it.
+2. **Never scrape, automate, or connect to LinkedIn in any form** — no
+   browser automation that spoofs fingerprints or evades bot detection, and
+   no LinkedIn source of any kind (scraper library, MCP connector, or
+   otherwise). This is a blanket exclusion, decided explicitly, not a default
+   to relax case by case. Job ingestion (`app/sources/`) draws from three
+   kinds of sources:
+   - Public, unauthenticated job-board JSON APIs — Greenhouse, Lever
+     (`app/sources/greenhouse.py`, `lever.py`), targeted manually via
+     `data/companies.yaml`.
+   - The `JobSpy` library (`app/sources/jobspy_source.py`) for Glassdoor,
+     Naukri, Indeed, ZipRecruiter, and Google Jobs — every call hardcodes
+     its site list to exclude `"linkedin"`, even if a caller passes it.
+   - MCP job-search connectors (`app/sources/mcp/`) — JOBO and Indeed/
+     HasData — for the dashboard's "Explore" search. No LinkedIn or Naukri
+     MCP connector is used, even a read-only one.
+   If a source needs more than what's listed above, flag it instead of
+   building around it.
 3. **Every factual claim in a generated resume/cover letter/screening answer
    must trace to an `evidence_id` from `data/evidence.yaml`.** No matching
    evidence id means the claim gets blocked by `claim_validator.py`, not
@@ -45,6 +57,7 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env             # then fill in ANTHROPIC_API_KEY
+                                  # (JOBO_MCP_API_KEY/HASDATA_* are optional — only needed for Explore)
 
 docker compose up -d             # starts Postgres
 psql postgresql://careerops:careerops@localhost:5432/careerops -f schema.sql
@@ -90,17 +103,35 @@ not generated:
   writing, used only as a style/tone reference for cover-letter generation.
   Currently empty except for an instructional `README.md` (which the loader
   skips by name).
+- `data/companies.yaml` — manual Greenhouse board tokens / Lever company
+  slugs for `app/sources/targets.py` to pull from. Still placeholder values
+  as of this writing.
 
 ## Architecture
 
 **Pipeline order, enforced by module boundaries more than by any orchestrator
 (there isn't one yet — see `memory/known-gaps.md`):**
 
-1. `app/sources/greenhouse.py` / `lever.py` — pull up to 50 postings per run
-   from each board's public JSON API, normalize fields (via
-   `app/sources/common.py`) onto the vocabulary `hard_filters.py` expects,
-   hash the description for dedupe, and insert into `jobs` with
-   `ON CONFLICT (description_hash) DO NOTHING`.
+1. Ingestion — three independent source paths, all normalizing onto the
+   vocabulary `hard_filters.py` expects (via `app/sources/common.py`),
+   hashing the description for dedupe, and inserting into `jobs` with
+   `ON CONFLICT (description_hash) DO NOTHING`. See rule 2 for what's
+   deliberately excluded (LinkedIn, in any form):
+   - `app/sources/greenhouse.py` / `lever.py` — up to 50 postings per run
+     from each board's public JSON API, driven by `app/sources/targets.py`
+     reading manually-maintained company targets from `data/companies.yaml`.
+   - `app/sources/jobspy_source.py` — wraps the `JobSpy` library for
+     Glassdoor, Naukri, Indeed, ZipRecruiter, and Google Jobs.
+     `ALLOWED_SITES` hardcodes LinkedIn out of every call.
+   - `app/sources/mcp/` — live, on-demand search against MCP job-search
+     servers (JOBO, Indeed/HasData; configured via `registry.py`'s env
+     vars) for the frontend's Explore page. `capabilities.py` inspects each
+     server's actual `list_tools()` response rather than assuming a fixed
+     schema, and `explore.py` fans a query out to every capable source in
+     parallel, skipping ones that error or lack a search tool. Explore
+     results are **not** auto-inserted into `jobs` — only a future
+     `/explore/{id}/save` endpoint does that, same dedup path as the other
+     two sources.
 2. `app/services/hard_filters.py` — deterministic, non-LLM checks
    (`check_hard_filters`, `check_company_cooldown`). Only jobs that pass
    these should ever reach the scorer.
@@ -119,6 +150,12 @@ not generated:
    DB layer) — human reviews fit/matches/gaps and generated documents next
    to evidence, and Approve/Reject sets `applications.status` to
    `APPROVED`/`REJECTED`. This is **not** the same as `APPLIED` — see next.
+   `app/api/` (FastAPI, `uvicorn app.api.main:app --reload`) is a second,
+   parallel UI surface for `../frontend` (a React app, not yet scaffolded)
+   — same `dashboard_data.py`/`tracker.py` functions underneath, just
+   reached over HTTP instead of imported in-process. Route handlers stay
+   thin wrappers; new query logic belongs in `dashboard_data.py`, not in
+   `app/api/routes/*.py`.
 7. `app/services/tracker.py` — `open_job_url()` opens the posting for manual
    application; `mark_applied()` is the only path to `applications.status =
    APPLIED`, requires explicit `confirmed=True`, and upserts

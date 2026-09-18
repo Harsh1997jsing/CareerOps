@@ -9,7 +9,9 @@ from app.services.dashboard_data import (
     _row_to_job_list_item,
     approve_application,
     check_cooldown_for_company,
+    get_application_context,
     get_application_for_job,
+    get_job,
     list_generated_documents,
     list_jobs,
     reject_application,
@@ -175,3 +177,59 @@ def test_reject_application_uses_rejected_status():
 
     _, params = mock_conn.execute.call_args[0]
     assert params["status"] == REJECTED_STATUS
+
+
+JOB_DETAIL_ROW = {**JOB_ROW, "description": "Build things with Python."}
+
+
+def test_get_job_returns_none_when_missing():
+    mock_engine, _ = _make_connect_mock_engine(mappings_first_return=None)
+
+    assert get_job(mock_engine, job_id=1) is None
+
+
+def test_get_job_maps_fields_and_includes_application():
+    mock_engine, mock_conn = _make_connect_mock_engine(mappings_first_return=JOB_DETAIL_ROW)
+    application = _row_to_application_item({"id": 5, "job_id": 1, "status": "READY_FOR_REVIEW", "applied_at": None})
+
+    with patch("app.services.dashboard_data.get_application_for_job", return_value=application):
+        job = get_job(mock_engine, job_id=1)
+
+    assert job.job_id == 1
+    assert job.description == "Build things with Python."
+    assert job.strong_matches == ["Python", "FastAPI"]
+    assert job.application is application
+    _, params = mock_conn.execute.call_args[0]
+    assert params == {"job_id": 1}
+
+
+def test_get_job_defaults_null_json_fields_to_empty_list():
+    row = {**JOB_DETAIL_ROW, "strong_matches": None, "missing_skills": None, "risks": None}
+    mock_engine, _ = _make_connect_mock_engine(mappings_first_return=row)
+
+    with patch("app.services.dashboard_data.get_application_for_job", return_value=None):
+        job = get_job(mock_engine, job_id=1)
+
+    assert job.strong_matches == []
+    assert job.missing_skills == []
+    assert job.risks == []
+
+
+def test_get_application_context_returns_none_when_missing():
+    mock_engine, _ = _make_connect_mock_engine(mappings_first_return=None)
+
+    assert get_application_context(mock_engine, application_id=7) is None
+
+
+def test_get_application_context_maps_fields():
+    row = {"application_id": 7, "job_id": 1, "company": "Acme", "url": "https://example.com/job/1"}
+    mock_engine, mock_conn = _make_connect_mock_engine(mappings_first_return=row)
+
+    context = get_application_context(mock_engine, application_id=7)
+
+    assert context.application_id == 7
+    assert context.job_id == 1
+    assert context.company == "Acme"
+    assert context.url == "https://example.com/job/1"
+    _, params = mock_conn.execute.call_args[0]
+    assert params == {"application_id": 7}

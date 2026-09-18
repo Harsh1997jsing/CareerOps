@@ -21,6 +21,20 @@ class NoVoiceSamplesError(RuntimeError):
 
 
 def load_voice_samples(voice_samples_dir: str = "data/voice_samples") -> list[str]:
+    """Read and return writing samples from candidate voice directory.
+
+    Scans for `.txt` and `.md` files in `voice_samples_dir`, skipping instructional
+    `README` files. Requires at least MIN_VOICE_SAMPLES (1) sample.
+
+    Args:
+        voice_samples_dir: Path to directory containing candidate's writing samples.
+
+    Returns:
+        list[str]: Cleaned text strings of candidate writing samples.
+
+    Raises:
+        NoVoiceSamplesError: If fewer than MIN_VOICE_SAMPLES samples are found.
+    """
     directory = Path(voice_samples_dir)
     samples = []
     if directory.is_dir():
@@ -43,6 +57,14 @@ def load_voice_samples(voice_samples_dir: str = "data/voice_samples") -> list[st
 
 @dataclass
 class CoverLetterResult:
+    """Result of cover letter generation.
+
+    Attributes:
+        content: The generated cover letter text.
+        word_count: Total word count of the generated content.
+        evidence_ids_used: Evidence IDs referenced during generation.
+        word_count_warning: Warning message if length falls outside target word range.
+    """
     content: str
     word_count: int
     evidence_ids_used: list[str]
@@ -51,6 +73,25 @@ class CoverLetterResult:
 
 def generate_cover_letter(job_description: str, evidence_path: str, profile_path: str,
                            voice_samples_dir: str = "data/voice_samples") -> CoverLetterResult:
+    """Generate a personalized cover letter matching candidate tone and evidence.
+
+    Constructs a prompt with job requirements, candidate profile, evidence, and writing
+    samples, then queries Claude. Validates resulting word count against MIN_WORDS
+    and MAX_WORDS targets.
+
+    Args:
+        job_description: Full text description of the target role.
+        evidence_path: Path to candidate evidence YAML file.
+        profile_path: Path to candidate profile YAML file.
+        voice_samples_dir: Directory containing candidate writing samples for tone matching.
+
+    Returns:
+        CoverLetterResult: Generated letter body, word count, cited evidence IDs, and any warning.
+
+    Raises:
+        NoVoiceSamplesError: If no writing samples are found in `voice_samples_dir`.
+        OSError: If profile or evidence files cannot be opened.
+    """
     with open(evidence_path) as f:
         evidence_yaml = f.read()
     with open(profile_path) as f:

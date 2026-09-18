@@ -20,6 +20,14 @@ JOBS_URL = "https://api.lever.co/v0/postings/{company_slug}"
 
 
 def _parse_created_at(value) -> datetime | None:
+    """Parse a millisecond Unix timestamp from Lever into a datetime object.
+
+    Args:
+        value: Integer or float millisecond timestamp from Lever API, or None.
+
+    Returns:
+        datetime | None: UTC datetime object, or None if input cannot be parsed.
+    """
     if value is None:
         return None
     try:
@@ -29,6 +37,15 @@ def _parse_created_at(value) -> datetime | None:
 
 
 def normalize_job(company: str, raw: dict) -> dict:
+    """Normalize raw Lever posting JSON into standard internal job dictionary.
+
+    Args:
+        company: Canonical company display name.
+        raw: Raw job dict from Lever JSON API.
+
+    Returns:
+        dict: Standardized job dictionary conforming to the jobs table schema.
+    """
     description = strip_html(raw.get("descriptionPlain") or raw.get("description") or "")
     categories = raw.get("categories") or {}
 
@@ -47,11 +64,23 @@ def normalize_job(company: str, raw: dict) -> dict:
 
 
 def fetch_jobs(company_slug: str, company: str, limit: int = MAX_JOBS_PER_RUN) -> list[dict]:
-    """
+    """Fetch open postings from a company's Lever-hosted public careers board.
+
     Fetches up to `limit` (capped at MAX_JOBS_PER_RUN) open postings for a
     Lever company slug — the name in a company's careers URL,
     jobs.lever.co/<company_slug>. `company` is the display name to store
     on each normalized job.
+
+    Args:
+        company_slug: Identifier slug in `jobs.lever.co/<company_slug>`.
+        company: Display company name to assign to the jobs.
+        limit: Max postings to fetch (capped at MAX_JOBS_PER_RUN = 50).
+
+    Returns:
+        list[dict]: List of normalized job dictionaries ready for database insertion.
+
+    Raises:
+        requests.HTTPError: If the HTTP request to Lever fails.
     """
     limit = min(limit, MAX_JOBS_PER_RUN)
     response = requests.get(

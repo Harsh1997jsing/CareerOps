@@ -16,15 +16,29 @@ from app.services.claim_validator import ClaimValidationOutcome, validate_claims
 
 @dataclass
 class DocumentReviewResult:
+    """Aggregated outcome of claim verification and ATS compatibility review.
+
+    Attributes:
+        claim_check: Result of fact-checking document claims against candidate evidence.
+        ats_check: Result of ATS structural format and text fidelity validation.
+    """
     claim_check: ClaimValidationOutcome
     ats_check: AtsValidationResult
 
     @property
     def ready_for_review(self) -> bool:
+        """Indicate whether the document passed both claim verification and ATS checks."""
         return self.claim_check.passed and self.ats_check.passed
 
 
 def record_validation_result(document_id: int, claim_check_passed: bool, ats_check_passed: bool) -> None:
+    """Persist claim and ATS validation flags into the `generated_documents` table.
+
+    Args:
+        document_id: Primary key of the generated document record.
+        claim_check_passed: Boolean indicating whether all factual claims were verified.
+        ats_check_passed: Boolean indicating whether ATS checks passed.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -45,6 +59,22 @@ def record_validation_result(document_id: int, claim_check_passed: bool, ats_che
 def review_generated_document(document_id: int, document_text: str, docx_path: str,
                                evidence_path: str, required_snippets: list[str],
                                workdir: str) -> DocumentReviewResult:
+    """Perform full claim-checking and ATS validation, recording results to the database.
+
+    Runs `validate_claims` to check facts against evidence and `validate_ats` to ensure
+    formatting is ATS-friendly. Updates the database row for `document_id`.
+
+    Args:
+        document_id: Database ID of the generated document.
+        document_text: Plain text content of the document.
+        docx_path: Filesystem path to the generated DOCX file.
+        evidence_path: Path to candidate evidence YAML file.
+        required_snippets: Crucial text snippets required to survive PDF round-trip.
+        workdir: Scratch/temporary directory for intermediate PDF conversion files.
+
+    Returns:
+        DocumentReviewResult: Combined review outcome containing claim and ATS results.
+    """
     claim_check = validate_claims(document_text, evidence_path)
     ats_check = validate_ats(docx_path, document_text, required_snippets, workdir)
 

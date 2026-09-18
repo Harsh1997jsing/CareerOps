@@ -8,14 +8,30 @@ from dataclasses import dataclass
 
 @dataclass
 class FilterResult:
+    """Outcome of evaluating deterministic filter rules against a job posting.
+
+    Attributes:
+        passed: True if the job satisfied all criteria.
+        reasons: List of explanatory violation messages if the check failed.
+    """
     passed: bool
     reasons: list[str]
 
 
 def check_hard_filters(job: dict, constraints: dict) -> FilterResult:
-    """
-    job: dict with keys location, employment_type, years_required, description
-    constraints: parsed contents of data/constraints.yaml
+    """Evaluate deterministic eligibility constraints against a job posting.
+
+    Checks location against `allowed_locations`, employment type against
+    `employment_types`, experience requirements against candidate maximum ceiling,
+    and description text for `exclude_keywords`.
+
+    Args:
+        job: Dictionary with keys 'location', 'employment_type', 'years_required',
+            and 'description'.
+        constraints: Parsed dictionary from `data/constraints.yaml`.
+
+    Returns:
+        FilterResult: Boolean pass status and list of violation explanations.
     """
     reasons = []
 
@@ -40,10 +56,18 @@ def check_hard_filters(job: dict, constraints: dict) -> FilterResult:
 
 
 def check_company_cooldown(company: str, applied_dates: list, cooldown_days: int) -> FilterResult:
-    """
-    applied_dates: list of datetime objects for prior applications to this company.
+    """Check whether candidate applied to this company within the cooldown window.
+
     Prevents re-applying to the same company inside the cooldown window —
     a common signal that gets applications auto-rejected as spammy.
+
+    Args:
+        company: Name of the company.
+        applied_dates: List of datetime objects representing past applications to this company.
+        cooldown_days: Minimum days required between subsequent applications.
+
+    Returns:
+        FilterResult: True if no cooldown active; False with days remaining if in cooldown.
     """
     from datetime import datetime, timedelta
 

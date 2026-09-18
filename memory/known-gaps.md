@@ -31,12 +31,26 @@ LibreOffice** available:
   `tracker.py`) is tested only against mocked SQLAlchemy engines/
   connections — the actual SQL has never run against real Postgres.
   `list_jobs()`'s `LEFT JOIN LATERAL` in particular is Postgres-specific
-  syntax that's only been checked by inspection, not execution.
+  syntax that's only been checked by inspection, not execution. This
+  applies equally to `app/api/routes/*.py` — its 16 tests mock the same
+  engine, so `uvicorn app.api.main:app` has never actually queried
+  Postgres either.
 - `ats_validator.convert_docx_to_pdf()`/`extract_pdf_text()` (the real
   DOCX→PDF→text round-trip) have never executed — only the pure structure/
   text-diff sub-functions are tested with fixture data. Install LibreOffice
   and run `pytest tests/test_ats_validator.py -v` to confirm the currently
   skipped `test_full_ats_roundtrip_with_real_libreoffice` passes.
+- `app/sources/mcp/` (JOBO, Indeed/HasData) has never connected to a real
+  MCP server — `JOBO_MCP_API_KEY`/`HASDATA_*` aren't set anywhere yet.
+  `capabilities.py`'s keyword-matching against tool names/schemas and
+  `explore.py`'s result-shape parsing (`structured_content` vs. text-JSON
+  fallback) are tested only against hand-written fixture `Tool`/
+  `CallToolResult` objects — real servers may name their tools/parameters
+  differently than the heuristics assume, or nest results under a key
+  `RESULT_LIST_KEYS` doesn't cover. Passing tests here only prove the
+  logic is internally consistent — once real keys exist, call
+  `app.sources.mcp.explore.search()` against the live servers and adjust
+  the heuristics to match what actually comes back.
 - `app/dashboard.py` has never been opened in an actual browser — only
   exercised via Streamlit's `AppTest` against mocked data.
 
