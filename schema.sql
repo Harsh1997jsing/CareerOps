@@ -89,3 +89,12 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE (tenant_id, email)
 );
 
+-- Performance Indexes
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_collected_at ON jobs(collected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_analysis_job_analyzed ON job_analysis(job_id, analyzed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_applications_job_id ON applications(job_id);
+CREATE INDEX IF NOT EXISTS idx_gen_docs_job_id ON generated_documents(job_id);
+CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id);
+
+

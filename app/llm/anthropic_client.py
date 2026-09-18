@@ -4,9 +4,11 @@ from here rather than calling anthropic.Anthropic() directly, so the
 model string and retry logic live in exactly one place.
 """
 
-import os
 from anthropic import Anthropic
 from pydantic import BaseModel
+
+from app.core.config import get_settings
+from app.core.exceptions import ConfigurationError
 
 _client: Anthropic | None = None
 
@@ -14,18 +16,23 @@ _client: Anthropic | None = None
 def get_client() -> Anthropic:
     """Retrieve or initialize the singleton Anthropic client.
 
-    Instantiates the Anthropic client using the `ANTHROPIC_API_KEY` environment
-    variable on first call, then reuses the cached client.
+    Instantiates the Anthropic client using `anthropic_api_key` from centralized
+    application settings on first call, then reuses the cached client.
 
     Returns:
         Anthropic: Configured Anthropic SDK client.
 
     Raises:
-        KeyError: If `ANTHROPIC_API_KEY` is not set in the environment.
+        ConfigurationError: If `anthropic_api_key` is not configured in settings.
     """
     global _client
     if _client is None:
-        _client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        settings = get_settings()
+        if not settings.anthropic_api_key:
+            raise ConfigurationError(
+                "ANTHROPIC_API_KEY is not set. Please configure it in your .env file."
+            )
+        _client = Anthropic(api_key=settings.anthropic_api_key)
     return _client
 
 
@@ -51,7 +58,7 @@ def structured_call(prompt: str, output_schema: type[BaseModel], max_tokens: int
         pydantic.ValidationError: If the response cannot be parsed into `output_schema`.
     """
     client = get_client()
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    model = get_settings().anthropic_model
 
     response = client.messages.parse(
         model=model,

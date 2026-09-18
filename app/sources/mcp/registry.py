@@ -5,8 +5,9 @@ that isn't, rather than failing the whole search. See CLAUDE.md rule 2:
 no LinkedIn or Naukri MCP connector belongs in this list.
 """
 
-import os
 from dataclasses import dataclass
+
+from app.core.config import get_settings
 
 
 @dataclass(frozen=True)
@@ -26,22 +27,23 @@ class McpSource:
 def configured_sources() -> list[McpSource]:
     """Retrieve all MCP job sources that have both an endpoint URL and API key defined.
 
-    Checks environment variables `JOBO_MCP_URL`, `JOBO_MCP_API_KEY`, `HASDATA_MCP_URL`,
-    and `HASDATA_MCP_API_KEY`. Filters out any sources missing credentials.
+    Checks settings for `jobo_mcp_url`, `jobo_mcp_api_key`, `hasdata_mcp_url`,
+    and `hasdata_mcp_api_key`. Filters out any sources missing credentials.
 
     Returns:
         list[McpSource]: List of validated, actively configured McpSource objects.
     """
+    settings = get_settings()
     candidates = [
         McpSource(
             name="jobo",
-            url=os.environ.get("JOBO_MCP_URL", "https://jobs-mcp.jobo.world/mcp"),
-            api_key=os.environ.get("JOBO_MCP_API_KEY"),
+            url=settings.jobo_mcp_url,
+            api_key=settings.jobo_mcp_api_key or None,
         ),
         McpSource(
             name="hasdata",
-            url=os.environ.get("HASDATA_MCP_URL", ""),
-            api_key=os.environ.get("HASDATA_MCP_API_KEY"),
+            url=settings.hasdata_mcp_url,
+            api_key=settings.hasdata_mcp_api_key or None,
         ),
     ]
     return [source for source in candidates if source.api_key and source.url]

@@ -1,76 +1,80 @@
 """Multi-tenant stateless JWT authentication and user management service.
 
 Implements:
-- Multi-tenant tenant and user models.
-- Secure PBKDF2 password hashing (pure standard library with high iteration count).
-- Stateless JWT generation and validation without session tracking tables.
+- Multi-tenant tenant and user domain models.
+- Secure PBKDF2 password hashing and stateless JWT integration via `app.core`.
 - Protected default admin enforcement: the default system admin can never be deleted.
 - Admin-only user provisioning within tenant boundaries.
 """
 
-import hashlib
-import hmac
-import os
-import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from datetime import datetime
+from typing import Mapping
 
-import jwt
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-# Configuration constants with safe defaults
-DEFAULT_JWT_SECRET = "careerops-super-secret-jwt-key-change-in-production"
-DEFAULT_ALGORITHM = "HS256"
-DEFAULT_EXPIRE_MINUTES = 1440  # 24 hours
-DEFAULT_ADMIN_EMAIL = os.environ.get("DEFAULT_ADMIN_EMAIL", "admin@careerops.local")
-DEFAULT_ADMIN_PASSWORD = os.environ.get("DEFAULT_ADMIN_PASSWORD", "adminpassword123")
-DEFAULT_TENANT_NAME = "Default Organization"
-DEFAULT_TENANT_SLUG = "default"
+from app.core.config import get_settings
+from app.core.database import init_db
+from app.core.exceptions import (
+    AuthError,
+    InvalidCredentialsError,
+    InvalidTokenError,
+    ProtectedAdminError,
+    TenantAlreadyExistsError,
+    TenantNotFoundError,
+    TokenError,
+    TokenExpiredError,
+    UserAlreadyExistsError,
+    UserNotFoundError,
+)
+from app.core.security import (
+    create_access_token,
+    decode_access_token,
+    hash_password,
+    verify_password,
+)
 
-PBKDF2_ITERATIONS = 100_000
+# Re-export for complete backward compatibility
+__all__ = [
+    "Tenant",
+    "User",
+    "UserContext",
+    "AuthError",
+    "InvalidCredentialsError",
+    "UserNotFoundError",
+    "UserAlreadyExistsError",
+    "ProtectedAdminError",
+    "TenantNotFoundError",
+    "TenantAlreadyExistsError",
+    "TokenError",
+    "TokenExpiredError",
+    "InvalidTokenError",
+    "hash_password",
+    "verify_password",
+    "create_access_token",
+    "decode_access_token",
+    "init_auth_db",
+    "create_tenant",
+    "get_tenant_by_id",
+    "get_tenant_by_slug",
+    "authenticate_user",
+    "create_user",
+    "get_user_by_id",
+    "list_users",
+    "delete_user",
+    "DEFAULT_ADMIN_EMAIL",
+    "DEFAULT_ADMIN_PASSWORD",
+    "DEFAULT_TENANT_NAME",
+    "DEFAULT_TENANT_SLUG",
+]
 
-
-# Exceptions
-class AuthError(Exception):
-    """Base exception for authentication and authorization errors."""
-
-
-class InvalidCredentialsError(AuthError):
-    """Raised when authentication credentials (email/password) are incorrect."""
-
-
-class UserNotFoundError(AuthError):
-    """Raised when a specified user does not exist."""
-
-
-class UserAlreadyExistsError(AuthError):
-    """Raised when attempting to create a user with an already registered email."""
-
-
-class ProtectedAdminError(AuthError):
-    """Raised when attempting to delete or alter the protected default administrator."""
-
-
-class TenantNotFoundError(AuthError):
-    """Raised when a tenant organization cannot be found."""
-
-
-class TenantAlreadyExistsError(AuthError):
-    """Raised when attempting to create a tenant with an existing slug."""
-
-
-class TokenError(AuthError):
-    """Base exception for JWT token processing errors."""
-
-
-class TokenExpiredError(TokenError):
-    """Raised when a JWT token has expired."""
-
-
-class InvalidTokenError(TokenError):
-    """Raised when a JWT token is invalid or malformed."""
+# Settings-derived defaults
+settings = get_settings()
+DEFAULT_ADMIN_EMAIL = settings.default_admin_email
+DEFAULT_ADMIN_PASSWORD = settings.default_admin_password
+DEFAULT_TENANT_NAME = settings.default_tenant_name
+DEFAULT_TENANT_SLUG = settings.default_tenant_slug
 
 
 # Data models
@@ -134,202 +138,15 @@ class UserContext:
     is_default_admin: bool
 
 
-# Password Security Functions
-def hash_password(password: str, salt: bytes | None = None) -> str:
-    """Hash a plaintext password using PBKDF2-HMAC-SHA256 with 100,000 iterations.
-
-    Args:
-        password: Plaintext password string.
-        salt: Optional 16-byte salt (generated randomly if None).
-
-    Returns:
-        str: Encoded hash string in format: `salt_hex$iterations$hash_hex`.
-    """
-    if salt is None:
-        salt = secrets.token_bytes(16)
-
-    pwd_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
-    return f"{salt.hex()}${PBKDF2_ITERATIONS}${pwd_hash.hex()}"
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plaintext password against an encoded PBKDF2 hash.
-
-    Args:
-        plain_password: Provided password string to test.
-        hashed_password: Stored hash string in `salt_hex$iterations$hash_hex` format.
-
-    Returns:
-        bool: True if password matches; False otherwise.
-    """
-    try:
-        parts = hashed_password.split("$")
-        if len(parts) != 3:
-            return False
-        salt_hex, iterations_str, expected_hash_hex = parts
-        salt = bytes.fromhex(salt_hex)
-        iterations = int(iterations_str)
-        expected_hash = bytes.fromhex(expected_hash_hex)
-
-        computed_hash = hashlib.pbkdf2_hmac("sha256", plain_password.encode("utf-8"), salt, iterations)
-        return hmac.compare_digest(computed_hash, expected_hash)
-    except Exception:
-        return False
-
-
-# JWT Token Functions
-def get_jwt_secret() -> str:
-    """Retrieve the configured JWT secret key from the environment.
-
-    Returns:
-        str: Secret key string.
-    """
-    return os.environ.get("JWT_SECRET_KEY", DEFAULT_JWT_SECRET)
-
-
-def get_jwt_algorithm() -> str:
-    """Retrieve the configured JWT signature algorithm.
-
-    Returns:
-        str: JWT algorithm identifier (e.g., 'HS256').
-    """
-    return os.environ.get("JWT_ALGORITHM", DEFAULT_ALGORITHM)
-
-
-def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
-    """Create a signed, stateless JWT access token.
-
-    Args:
-        data: Dictionary of claims to encode in the token payload.
-        expires_delta: Optional custom expiration timedelta.
-
-    Returns:
-        str: Encoded JWT access token string.
-    """
-    to_encode = data.copy()
-    now = datetime.now(timezone.utc)
-    if expires_delta:
-        expire = now + expires_delta
-    else:
-        minutes = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", DEFAULT_EXPIRE_MINUTES))
-        expire = now + timedelta(minutes=minutes)
-
-    to_encode.update({"exp": expire, "iat": now})
-    secret = get_jwt_secret()
-    algorithm = get_jwt_algorithm()
-    return jwt.encode(to_encode, secret, algorithm=algorithm)
-
-
-def decode_access_token(token: str) -> dict[str, Any]:
-    """Decode and validate a signed JWT access token.
-
-    Args:
-        token: JWT string.
-
-    Returns:
-        dict[str, Any]: Decoded payload claims dictionary.
-
-    Raises:
-        TokenExpiredError: If token expiration timestamp (`exp`) has passed.
-        InvalidTokenError: If token signature is invalid or token is malformed.
-    """
-    secret = get_jwt_secret()
-    algorithm = get_jwt_algorithm()
-    try:
-        payload = jwt.decode(token, secret, algorithms=[algorithm])
-        return payload
-    except jwt.ExpiredSignatureError as e:
-        raise TokenExpiredError("Access token has expired") from e
-    except jwt.PyJWTError as e:
-        raise InvalidTokenError("Invalid access token") from e
-
-
-# Database Initialization & Seeding
 def init_auth_db(engine: Engine) -> None:
     """Bootstrap auth tables and seed the protected default admin user.
 
-    Ensures `tenants` and `users` tables exist, verifies the default tenant,
-    and seeds the protected default administrator account if missing.
+    Delegates to centralized database bootstrap in `app.core.database`.
 
     Args:
         engine: SQLAlchemy Engine instance.
     """
-    is_sqlite = engine.dialect.name == "sqlite"
-    id_type = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "SERIAL PRIMARY KEY"
-    time_default = "CURRENT_TIMESTAMP" if is_sqlite else "now()"
-    bool_true = "1" if is_sqlite else "true"
-    bool_false = "0" if is_sqlite else "false"
-
-    with engine.begin() as conn:
-        # Create tenants table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS tenants (
-                    id {id_type},
-                    name TEXT NOT NULL,
-                    slug TEXT NOT NULL UNIQUE,
-                    is_active BOOLEAN DEFAULT {bool_true},
-                    created_at TIMESTAMP DEFAULT {time_default}
-                )
-                """
-            )
-        )
-        # Create users table
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS users (
-                    id {id_type},
-                    tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
-                    email TEXT NOT NULL,
-                    hashed_password TEXT NOT NULL,
-                    role TEXT NOT NULL DEFAULT 'user',
-                    is_default_admin BOOLEAN DEFAULT {bool_false},
-                    is_active BOOLEAN DEFAULT {bool_true},
-                    created_at TIMESTAMP DEFAULT {time_default},
-                    UNIQUE (tenant_id, email)
-                )
-                """
-            )
-        )
-
-        # Ensure default tenant exists
-        row = conn.execute(
-            text("SELECT id FROM tenants WHERE slug = :slug"),
-            {"slug": DEFAULT_TENANT_SLUG},
-        ).mappings().first()
-
-        if row is None:
-            res = conn.execute(
-                text("INSERT INTO tenants (name, slug) VALUES (:name, :slug) RETURNING id"),
-                {"name": DEFAULT_TENANT_NAME, "slug": DEFAULT_TENANT_SLUG},
-            ).mappings().first()
-            tenant_id = res["id"]
-        else:
-            tenant_id = row["id"]
-
-        # Ensure default admin user exists
-        admin_row = conn.execute(
-            text("SELECT id, is_default_admin FROM users WHERE tenant_id = :tenant_id AND email = :email"),
-            {"tenant_id": tenant_id, "email": DEFAULT_ADMIN_EMAIL},
-        ).mappings().first()
-
-        if admin_row is None:
-            hashed_pwd = hash_password(DEFAULT_ADMIN_PASSWORD)
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO users (tenant_id, email, hashed_password, role, is_default_admin, is_active)
-                    VALUES (:tenant_id, :email, :hashed_password, 'admin', true, true)
-                    """
-                ),
-                {
-                    "tenant_id": tenant_id,
-                    "email": DEFAULT_ADMIN_EMAIL,
-                    "hashed_password": hashed_pwd,
-                },
-            )
+    init_db(engine)
 
 
 # Mapping helpers

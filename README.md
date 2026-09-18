@@ -136,22 +136,16 @@ from app.sources.mcp.explore import search
 jobs = asyncio.run(search("backend engineer", {"location": "Bangalore"}))
 ```
 
-## Run the dashboard (needs Postgres reachable via `DATABASE_URL`)
-
-```bash
-streamlit run app/dashboard.py
-```
-
-Lists jobs with fit score/confidence/matches/gaps, previews generated
-documents next to `data/evidence.yaml`, warns on company cooldown, and lets
-you Approve/Reject. Approve marks an application `APPROVED` for your
-review — it does **not** submit anything or mark it `APPLIED`.
-
-## Run the API (needs Postgres reachable via `DATABASE_URL`)
+## Run the API Server (needs Postgres reachable via `DATABASE_URL`)
 
 ```bash
 uvicorn app.api.main:app --reload
 ```
+
+The FastAPI REST API provides read-heavy endpoints for jobs, applications,
+and MCP exploration, complete multi-tenant stateless JWT authentication,
+and powers the React frontend interface.
+
 
 Backs `../frontend` (a React app — see its README, not yet scaffolded) over
 the 9 routes documented there: list/review jobs, approve/reject, open a

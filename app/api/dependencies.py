@@ -1,15 +1,18 @@
+from collections.abc import Generator
+
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
-from app.db import get_engine
-from app.services.auth import (
+from app.core import (
     InvalidTokenError,
     TokenExpiredError,
-    UserContext,
     decode_access_token,
-    get_user_by_id,
+    get_db as core_get_db,
+    get_engine,
 )
+from app.services.auth import UserContext, get_user_by_id
 
 security_bearer = HTTPBearer(auto_error=False)
 
@@ -21,6 +24,15 @@ def get_db_engine() -> Engine:
         Engine: Shared database engine instance for executing queries.
     """
     return get_engine()
+
+
+def get_db() -> Generator[Session, None, None]:
+    """FastAPI dependency that provides a managed SQLAlchemy database Session.
+
+    Yields:
+        Session: Open database session for executing ORM and SQL queries.
+    """
+    yield from core_get_db()
 
 
 def get_current_user(

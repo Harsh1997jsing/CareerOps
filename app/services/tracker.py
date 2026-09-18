@@ -11,11 +11,9 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.core.exceptions import ApplicationNotConfirmedError
+
 APPLIED_STATUS = "APPLIED"
-
-
-class ApplicationNotConfirmedError(RuntimeError):
-    """Raised when mark_applied() is called without explicit human confirmation."""
 
 
 def open_job_url(url: str) -> None:
