@@ -150,3 +150,98 @@ class CapabilityMatrixOut(BaseModel):
         flags: Mapping of capability names (e.g. 'search', 'location_filter') to support booleans.
     """
     flags: dict[str, bool]
+
+
+class LoginRequest(BaseModel):
+    """Credentials submitted to obtain a stateless JWT access token.
+
+    Attributes:
+        email: Registered account email address.
+        password: Raw password.
+        tenant_slug: Slug of the target organization (defaults to 'default').
+    """
+    email: str
+    password: str
+    tenant_slug: str = "default"
+
+
+class TokenOut(BaseModel):
+    """Stateless JWT access token response.
+
+    Attributes:
+        access_token: Encoded JWT bearer token string.
+        token_type: Token type identifier ('bearer').
+        tenant_id: Numerical tenant ID.
+        tenant_slug: Tenant organization slug.
+        role: User role ('admin' or 'user').
+        email: Authenticated user email.
+    """
+    access_token: str
+    token_type: str = "bearer"
+    tenant_id: int
+    tenant_slug: str
+    role: str
+    email: str
+
+
+class UserOut(BaseModel):
+    """User account details returned across API routes.
+
+    Attributes:
+        id: Unique user primary key ID.
+        tenant_id: Tenant organization ID.
+        email: User email address.
+        role: Account role ('admin' or 'user').
+        is_default_admin: Whether account is the protected system administrator.
+        is_active: Whether user account is enabled.
+        created_at: Account creation timestamp string if available.
+    """
+    id: int
+    tenant_id: int
+    email: str
+    role: str
+    is_default_admin: bool
+    is_active: bool
+    created_at: str | None = None
+
+
+class UserCreateRequest(BaseModel):
+    """Payload to provision a new user under the current admin's tenant.
+
+    Attributes:
+        email: New user's email address.
+        password: Initial password.
+        role: User role ('user' or 'admin', defaults to 'user').
+    """
+    email: str
+    password: str
+    role: str = "user"
+
+
+class TenantCreateRequest(BaseModel):
+    """Payload to register a new tenant organization.
+
+    Attributes:
+        name: Organization display name.
+        slug: Normalized identifier slug.
+    """
+    name: str
+    slug: str
+
+
+class TenantOut(BaseModel):
+    """Tenant organization representation returned across API routes.
+
+    Attributes:
+        id: Unique tenant ID.
+        name: Organization display name.
+        slug: Tenant identifier slug.
+        is_active: Whether organization is active.
+        created_at: Creation timestamp string if available.
+    """
+    id: int
+    name: str
+    slug: str
+    is_active: bool
+    created_at: str | None = None
+

@@ -68,3 +68,24 @@ CREATE TABLE IF NOT EXISTS company_application_history (
     applied_at TIMESTAMP,
     UNIQUE (company, job_id)
 );
+
+CREATE TABLE IF NOT EXISTS tenants (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    hashed_password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    is_default_admin BOOLEAN DEFAULT false,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT now(),
+    UNIQUE (tenant_id, email)
+);
+

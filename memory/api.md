@@ -7,14 +7,19 @@ It is intentionally **read-heavy and decoupled from LLM logic**:
 - It never calls Anthropic or executes LLM scoring/generation directly.
 - It exposes results already produced by the pipeline services (`dashboard_data`, `tracker`, `mcp`).
 - It strictly enforces CareerOps human-approval principles (CLAUDE.md Rules 1 and 5).
+- Provides a **Multi-Tenant Stateless JWT Authentication** system with protected system admin and tenant isolation.
 
 ---
 
 ## Completion Status
 
-- **Total Endpoints Planned:** 9
-- **Total Endpoints Completed:** 9 (100% complete)
-- **Test Coverage:** 16 unit tests across `tests/test_api_jobs.py`, `tests/test_api_applications.py`, and `tests/test_api_explore.py` (all mocked, zero external dependencies required).
+- **Total Endpoints Completed:** 16 endpoints across 4 route modules (100% complete)
+- **Test Coverage:**
+  - `tests/test_auth.py`: 13 service-level tests (password hashing, stateless JWT encoding/decoding, tenant isolation, protected default admin deletion prevention).
+  - `tests/test_api_auth.py`: 13 route-level tests (login, profile `/auth/me`, admin user provisioning, forbidden regular user operations, blocked admin deletion).
+  - `tests/test_api_jobs.py`: 6 tests.
+  - `tests/test_api_applications.py`: 5 tests.
+  - `tests/test_api_explore.py`: 5 tests.
 
 ---
 
@@ -22,22 +27,75 @@ It is intentionally **read-heavy and decoupled from LLM logic**:
 
 | # | HTTP Method | Route | Module | Purpose | Status |
 |---|-------------|-------|--------|---------|:------:|
-| 1 | `GET` | `/jobs` | `routes/jobs.py` | List jobs with match analysis summaries and optional `?status=` filtering | **Completed** |
-| 2 | `GET` | `/jobs/{job_id}` | `routes/jobs.py` | Retrieve full job details, complete description, and linked application record | **Completed** |
-| 3 | `GET` | `/jobs/{job_id}/documents` | `routes/jobs.py` | List generated resumes and cover letters with claim/ATS check statuses | **Completed** |
-| 4 | `POST` | `/applications/{application_id}/approve` | `routes/applications.py` | Transition an application status to `APPROVED` | **Completed** |
-| 5 | `POST` | `/applications/{application_id}/reject` | `routes/applications.py` | Transition an application status to `REJECTED` | **Completed** |
-| 6 | `POST` | `/applications/{application_id}/open` | `routes/applications.py` | Open the posting URL in the host's default web browser | **Completed** |
-| 7 | `POST` | `/applications/{application_id}/mark-applied` | `routes/applications.py` | Record manual human submission (`APPLIED`), update company cooldown | **Completed** |
-| 8 | `GET` | `/explore/capabilities` | `routes/explore.py` | Inspect configured remote MCP servers and return supported filter/search flags | **Completed** |
-| 9 | `POST` | `/explore/search` | `routes/explore.py` | Fan-out distributed job search across connected MCP connectors | **Completed** |
-| 10 | `POST` | `/explore/save` | `routes/explore.py` | Recompute SHA-256 hash server-side and insert explored job into `jobs` table | **Completed** |
+| 1 | `POST` | `/auth/login` | `routes/auth.py` | Authenticate email/password and issue stateless signed JWT access token | **Completed** |
+| 2 | `GET` | `/auth/me` | `routes/auth.py` | Fetch authenticated user profile and tenant claims from Bearer token | **Completed** |
+| 3 | `POST` | `/auth/users` | `routes/auth.py` | Admin-only: Provision a new user within administrator's tenant | **Completed** |
+| 4 | `GET` | `/auth/users` | `routes/auth.py` | Admin-only: List all users belonging to administrator's tenant | **Completed** |
+| 5 | `DELETE` | `/auth/users/{user_id}` | `routes/auth.py` | Admin-only: Delete tenant user (Default admin is immutable/protected) | **Completed** |
+| 6 | `POST` | `/auth/tenants` | `routes/auth.py` | Admin-only: Register a new tenant organization | **Completed** |
+| 7 | `GET` | `/jobs` | `routes/jobs.py` | List jobs with match analysis summaries and optional `?status=` filtering | **Completed** |
+| 8 | `GET` | `/jobs/{job_id}` | `routes/jobs.py` | Retrieve full job details, complete description, and linked application record | **Completed** |
+| 9 | `GET` | `/jobs/{job_id}/documents` | `routes/jobs.py` | List generated resumes and cover letters with claim/ATS check statuses | **Completed** |
+| 10 | `POST` | `/applications/{application_id}/approve` | `routes/applications.py` | Transition an application status to `APPROVED` | **Completed** |
+| 11 | `POST` | `/applications/{application_id}/reject` | `routes/applications.py` | Transition an application status to `REJECTED` | **Completed** |
+| 12 | `POST` | `/applications/{application_id}/open` | `routes/applications.py` | Open the posting URL in the host's default web browser | **Completed** |
+| 13 | `POST` | `/applications/{application_id}/mark-applied` | `routes/applications.py` | Record manual human submission (`APPLIED`), update company cooldown | **Completed** |
+| 14 | `GET` | `/explore/capabilities` | `routes/explore.py` | Inspect configured remote MCP servers and return supported filter/search flags | **Completed** |
+| 15 | `POST` | `/explore/search` | `routes/explore.py` | Fan-out distributed job search across connected MCP connectors | **Completed** |
+| 16 | `POST` | `/explore/save` | `routes/explore.py` | Recompute SHA-256 hash server-side and insert explored job into `jobs` table | **Completed** |
 
 ---
 
 ## Endpoint Details
 
-### 1. Jobs (`app/api/routes/jobs.py`)
+### 1. Authentication & Multi-Tenancy (`app/api/routes/auth.py`)
+
+Stateless JWT authentication and tenant-scoped user management. No server-side session tables or Redis storage are utilized.
+
+#### `POST /auth/login`
+- **Request Body:** `LoginRequest` (`email: str`, `password: str`, `tenant_slug: str = "default"`)
+- **Response Schema:** `TokenOut` (`access_token`, `token_type: "bearer"`, `tenant_id`, `tenant_slug`, `role`, `email`)
+- **Underlying Service:** `app.services.auth.authenticate_user(engine, email, password, tenant_slug)` & `create_access_token(...)`
+- **Behavior:** Validates password using PBKDF2-HMAC-SHA256 (100,000 iterations). Returns a stateless JWT bearer token encoded with claims (`sub`, `tenant_id`, `tenant_slug`, `email`, `role`, `is_default_admin`). Returns `401 Unauthorized` on mismatch.
+
+#### `GET /auth/me`
+- **Headers:** `Authorization: Bearer <token>`
+- **Response Schema:** `UserOut` (`id`, `tenant_id`, `email`, `role`, `is_default_admin`, `is_active`, `created_at`)
+- **Underlying Dependency:** `get_current_user` extracts and cryptographically validates the token.
+- **Behavior:** Returns current account details for the authenticated user.
+
+#### `POST /auth/users`
+- **Headers:** `Authorization: Bearer <token>` (Must have `role == "admin"`)
+- **Request Body:** `UserCreateRequest` (`email: str`, `password: str`, `role: str = "user"`)
+- **Response Schema:** `UserOut` (Status code: `201 Created`)
+- **Underlying Service:** `app.services.auth.create_user(engine, tenant_id, email, password, role)`
+- **Behavior:** Only administrators can create users. Newly created users are automatically scoped strictly to the administrator's tenant. Returns `403 Forbidden` if requested by a non-admin, and `409 Conflict` if the email already exists in that tenant.
+
+#### `GET /auth/users`
+- **Headers:** `Authorization: Bearer <token>` (Must have `role == "admin"`)
+- **Response Schema:** `list[UserOut]`
+- **Underlying Service:** `app.services.auth.list_users(engine, tenant_id)`
+- **Behavior:** Returns all user accounts scoped to the requesting administrator's tenant organization.
+
+#### `DELETE /auth/users/{user_id}`
+- **Headers:** `Authorization: Bearer <token>` (Must have `role == "admin"`)
+- **Path Parameters:** `user_id: int`
+- **Response Schema:** `dict` (`{"deleted": true, "user_id": int}`)
+- **Underlying Service:** `app.services.auth.delete_user(engine, tenant_id, user_id)`
+- **Security Invariant:** **The default administrator (`is_default_admin=True`) CAN NEVER BE DELETED under any circumstances.**
+  - If a user attempts to delete the default admin, the service raises `ProtectedAdminError`, and the endpoint responds with `403 Forbidden` (`"The default administrator user is protected and cannot be deleted"`).
+  - Non-existent user returns `404 Not Found`.
+
+#### `POST /auth/tenants`
+- **Headers:** `Authorization: Bearer <token>` (Must have `role == "admin"`)
+- **Request Body:** `TenantCreateRequest` (`name: str`, `slug: str`)
+- **Response Schema:** `TenantOut` (Status code: `201 Created`)
+- **Underlying Service:** `app.services.auth.create_tenant(engine, name, slug)`
+- **Behavior:** Registers a new tenant organization. Returns `409 Conflict` if the slug is already registered.
+
+---
+
+### 2. Jobs (`app/api/routes/jobs.py`)
 
 #### `GET /jobs`
 - **Query Parameters:** `status: str | None` (e.g., `READY_FOR_REVIEW`, `APPROVED`, `REJECT`)
@@ -59,7 +117,7 @@ It is intentionally **read-heavy and decoupled from LLM logic**:
 
 ---
 
-### 2. Applications (`app/api/routes/applications.py`)
+### 3. Applications (`app/api/routes/applications.py`)
 
 #### `POST /applications/{application_id}/approve`
 - **Path Parameters:** `application_id: int`
@@ -87,7 +145,7 @@ It is intentionally **read-heavy and decoupled from LLM logic**:
 
 ---
 
-### 3. Explore & MCP Connectors (`app/api/routes/explore.py`)
+### 4. Explore & MCP Connectors (`app/api/routes/explore.py`)
 
 #### `GET /explore/capabilities`
 - **Response Schema:** `dict[str, CapabilityMatrixOut]`
@@ -110,13 +168,23 @@ It is intentionally **read-heavy and decoupled from LLM logic**:
 
 ## Architectural Guarantees
 
-1. **Local-First Separation of Concerns:**
+1. **Stateless JWT Security:**
+   - Cryptographically signed with HMAC-SHA256 (`HS256`).
+   - PBKDF2-HMAC-SHA256 password hashing with 100,000 iterations and 16-byte random salts.
+   - Zero server-side session persistence tables needed.
+2. **Protected Default Administrator:**
+   - Seeded on initial startup with `is_default_admin = true`.
+   - Immutable security guarantee: cannot be deleted by any route or user.
+3. **Tenant Boundary Isolation:**
+   - User queries and creation strictly bound to `tenant_id`.
+4. **Local-First Separation of Concerns:**
    - LLM schema definitions live in `app/llm/schemas.py`.
    - Wire API schema definitions live in `app/api/schemas.py`.
    - LLM prompt adjustments cannot accidentally break frontend contract contracts.
-2. **CORS Configuration:**
+5. **CORS Configuration:**
    - Managed in `app/api/main.py`.
+   - Supports GET, POST, DELETE, PUT, PATCH, OPTIONS.
    - Configurable via `FRONTEND_ORIGIN` environment variable (defaults to `http://localhost:5173`).
-3. **Database Dependencies:**
+6. **Database Dependencies:**
    - Injected via FastAPI's `Depends(get_db_engine)`.
-   - Easily mocked in unit tests without touching a live PostgreSQL container.
+   - Tested seamlessly with both PostgreSQL and SQLite in-memory with `StaticPool`.
