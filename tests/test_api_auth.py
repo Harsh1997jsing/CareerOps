@@ -25,12 +25,16 @@ def auth_client():
     )
     init_auth_db(engine)
 
+    previous_override = app.dependency_overrides.get(get_db_engine)
     app.dependency_overrides[get_db_engine] = lambda: engine
     client = TestClient(app)
 
     yield client, engine
 
-    app.dependency_overrides.pop(get_db_engine, None)
+    if previous_override is not None:
+        app.dependency_overrides[get_db_engine] = previous_override
+    else:
+        app.dependency_overrides.pop(get_db_engine, None)
 
 
 def _login_as(client: TestClient, email: str, password: str, tenant_slug: str = "default") -> str:

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 
+from sqlalchemy.engine import Engine
+
 from app.db import get_engine
 from app.services.ats_validator import AtsValidationResult, validate_ats
 from app.services.claim_validator import ClaimValidationOutcome, validate_claims
@@ -31,16 +33,22 @@ class DocumentReviewResult:
         return self.claim_check.passed and self.ats_check.passed
 
 
-def record_validation_result(document_id: int, claim_check_passed: bool, ats_check_passed: bool) -> None:
+def record_validation_result(
+    document_id: int,
+    claim_check_passed: bool,
+    ats_check_passed: bool,
+    engine: Engine | None = None,
+) -> None:
     """Persist claim and ATS validation flags into the `generated_documents` table.
 
     Args:
         document_id: Primary key of the generated document record.
         claim_check_passed: Boolean indicating whether all factual claims were verified.
         ats_check_passed: Boolean indicating whether ATS checks passed.
+        engine: Optional SQLAlchemy Engine dependency (defaults to singleton get_engine()).
     """
-    engine = get_engine()
-    with engine.begin() as conn:
+    db_engine = engine if engine is not None else get_engine()
+    with db_engine.begin() as conn:
         conn.execute(
             text(
                 "UPDATE generated_documents "

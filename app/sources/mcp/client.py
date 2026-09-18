@@ -6,7 +6,7 @@ how app/llm/anthropic_client.py is the sole place that touches the
 Anthropic SDK.
 """
 
-import httpx2
+import httpx
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, Tool
@@ -23,7 +23,7 @@ def _make_client(url: str, api_key: str | None) -> Client:
         Client: Instantiated high-level MCP client.
     """
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    http_client = httpx2.AsyncClient(headers=headers, timeout=30.0)
+    http_client = httpx.AsyncClient(headers=headers, timeout=30.0)
     transport = streamable_http_client(url, http_client=http_client)
     return Client(transport, raise_exceptions=True)
 

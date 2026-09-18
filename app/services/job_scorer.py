@@ -2,10 +2,9 @@
 Only jobs that pass hard_filters.py reach this module.
 """
 
-import yaml
 from app.llm.anthropic_client import structured_call
-from app.llm.schemas import JobFitAnalysis
 from app.llm.prompts import JOB_FIT_ANALYSIS_PROMPT
+from app.llm.schemas import JobFitAnalysis
 
 
 def score_job(job_description: str, skills_path: str, evidence_path: str, constraints_path: str) -> JobFitAnalysis:
