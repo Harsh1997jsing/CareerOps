@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import func, select
 
 from app.models import Job
@@ -58,6 +60,18 @@ def test_normalize_employment_type_handles_none():
     assert normalize_employment_type(None) is None
 
 
+def test_normalize_employment_type_handles_nan_without_crashing():
+    # pandas represents a missing object-column value as float('nan'), not
+    # None — `bool(float('nan'))` is True, so a bare `if not raw_type`
+    # guard doesn't catch it and `.strip()` used to raise AttributeError.
+    assert normalize_employment_type(float("nan")) is None
+
+
+def test_normalize_employment_type_handles_empty_string():
+    assert normalize_employment_type("") is None
+    assert normalize_employment_type("   ") is None
+
+
 JOB = {
     "source": "greenhouse", "source_job_id": "1", "company": "Acme", "title": "Engineer",
     "location": "Remote", "url": "https://example.com", "description": "desc",
@@ -97,3 +111,19 @@ async def test_insert_jobs_inserts_the_rest_of_the_batch_around_a_duplicate(db_s
 
     assert inserted == 1
     assert await _job_count(db_session) == 2
+
+
+async def test_insert_jobs_strips_timezone_from_posted_at(db_session):
+    # Live bug (2026-09-19): Job.posted_at is TIMESTAMP WITHOUT TIME ZONE.
+    # A job saved via POST /explore/save carries a tz-aware datetime
+    # (pydantic parses an ISO "...Z" string that way) — asyncpg raises
+    # DataError ("can't subtract offset-naive and offset-aware datetimes"),
+    # not IntegrityError, so it wasn't even caught as a dedup skip; it
+    # 500'd the whole request.
+    aware = datetime(2026, 7, 18, 9, 21, 36, tzinfo=timezone.utc)
+
+    await insert_jobs(db_session, [{**JOB, "posted_at": aware}])
+
+    job = (await db_session.scalars(select(Job))).first()
+    assert job.posted_at == datetime(2026, 7, 18, 9, 21, 36)
+    assert job.posted_at.tzinfo is None

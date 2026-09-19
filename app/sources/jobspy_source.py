@@ -16,6 +16,7 @@ from app.sources.common import (
     description_hash,
     normalize_employment_type,
     normalize_location,
+    safe_int,
     strip_html,
 )
 
@@ -23,6 +24,15 @@ from app.sources.common import (
 # deliberately absent — CLAUDE.md rule 2 forbids it outright, so it's
 # filtered out below even if a caller passes it explicitly.
 ALLOWED_SITES = ["indeed", "glassdoor", "naukri", "zip_recruiter", "google"]
+
+# jobspy.scrape_jobs()'s own default is "usa" — this app's whole location
+# vocabulary is India-only (data/constraints.yaml's allowed_locations:
+# Remote/Bangalore/Pune/Hyderabad), so leaving the default in place makes
+# Indeed silently search the wrong country's catalog and return zero
+# results for every India query (confirmed: same search+location returned
+# 0 rows against "usa", 5 real rows against "india"). Glassdoor reads the
+# same setting for which country's site to hit.
+DEFAULT_COUNTRY = "india"
 
 # jobspy.scrape_jobs() accepts **kwargs but doesn't actually thread a
 # timeout through to any scraper (verified against the installed
@@ -37,23 +47,30 @@ FETCH_TIMEOUT_SECONDS = 90
 logger = logging.getLogger(__name__)
 
 
-def _safe_int(value) -> int | None:
-    """Safely convert numeric, float, or NaN value into an integer.
+def _clean_str(value) -> str:
+    """Coerce a python-jobspy DataFrame cell to a plain string, NaN-safe.
+
+    A pandas DataFrame represents a missing value in an object (string)
+    column as `float('nan')`, not `None` — and the once-common `value or
+    default` guard doesn't catch it, since `bool(float('nan'))` is `True`
+    in Python. Left unguarded, that NaN reaches a `.strip()`/`.lower()`
+    call downstream and raises `AttributeError: 'float' object has no
+    attribute 'strip'`, crashing the whole scrape with a 500 (confirmed
+    live via `POST /scrape/jobspy` — `job_type` was the one that surfaced
+    it, but `company`/`title`/`location`/`description`/the URL fields were
+    equally exposed). Cleaning every DataFrame cell through this the
+    moment it's read is cheaper than guarding every downstream `.strip()`
+    call individually.
 
     Args:
-        value: Numeric value, NaN, string representation, or None.
+        value: A raw DataFrame cell — a string, NaN, None, or absent.
 
     Returns:
-        int | None: Converted integer, or None if input is None, NaN, or unparseable.
+        str: The value as a string, "" if it was missing/NaN/None.
     """
-    if value is None:
-        return None
-    try:
-        if isinstance(value, float) and math.isnan(value):
-            return None
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    return str(value)
 
 
 def _parse_posted_at(value) -> datetime | None:
@@ -86,22 +103,22 @@ def normalize_job(row: dict) -> dict:
     Returns:
         dict: Normalized job payload conforming to `jobs` database table.
     """
-    description = strip_html(row.get("description") or "")
-    url = row.get("job_url") or row.get("job_url_direct") or ""
+    description = strip_html(_clean_str(row.get("description")))
+    url = _clean_str(row.get("job_url")) or _clean_str(row.get("job_url_direct"))
 
     return {
-        "source": row.get("site") or "jobspy",
-        "source_job_id": str(row.get("id") or description_hash(url or description)[:16]),
-        "company": (row.get("company") or "").strip(),
-        "title": (row.get("title") or "").strip(),
-        "location": normalize_location(row.get("location") or ""),
+        "source": _clean_str(row.get("site")) or "jobspy",
+        "source_job_id": _clean_str(row.get("id")) or description_hash(url or description)[:16],
+        "company": _clean_str(row.get("company")).strip(),
+        "title": _clean_str(row.get("title")).strip(),
+        "location": normalize_location(_clean_str(row.get("location"))),
         "url": url,
         "description": description,
         "description_hash": description_hash(description),
         "employment_type": normalize_employment_type(row.get("job_type")),
         "posted_at": _parse_posted_at(row.get("date_posted")),
-        "salary_min": _safe_int(row.get("min_amount")),
-        "salary_max": _safe_int(row.get("max_amount")),
+        "salary_min": safe_int(row.get("min_amount")),
+        "salary_max": safe_int(row.get("max_amount")),
     }
 
 
@@ -136,6 +153,7 @@ def fetch_jobs(
         return []
 
     limit = min(results_wanted, MAX_JOBS_PER_RUN)
+    kwargs.setdefault("country_indeed", DEFAULT_COUNTRY)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(

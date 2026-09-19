@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from mcp.types import CallToolResult, Tool
@@ -5,6 +6,8 @@ from mcp.types import CallToolResult, Tool
 from app.sources.mcp.explore import (
     _build_search_arguments,
     _extract_results,
+    _filter_by_recency,
+    _parse_posted_at,
     get_all_capabilities,
     normalize_result,
     search,
@@ -54,6 +57,76 @@ def test_normalize_result_maps_fields():
     assert job["employment_type"] == "Full-time"
     assert job["salary_min"] == 1000000
     assert len(job["description_hash"]) == 64
+
+
+def test_normalize_result_derives_posted_at_from_age_in_days():
+    # Live confirmed shape (2026-09-19): HasData's Glassdoor tool has no
+    # absolute date field at all, only an integer ageInDays.
+    row = {**RAW_RESULT, "ageInDays": 10}
+    before = datetime.now(timezone.utc) - timedelta(days=10, minutes=1)
+    job = normalize_result("hasdata", row)
+    assert job["posted_at"] is not None
+    assert job["posted_at"] > before
+
+
+def test_normalize_result_posted_at_none_without_any_date_info():
+    job = normalize_result("jobo", RAW_RESULT)
+    assert job["posted_at"] is None
+
+
+def test_parse_posted_at_falls_back_to_iso_string_fields():
+    parsed = _parse_posted_at({"date_posted": "2026-09-10T00:00:00Z"})
+    assert parsed == datetime(2026, 9, 10, tzinfo=timezone.utc)
+
+
+def test_parse_posted_at_ignores_unparseable_date_string():
+    assert _parse_posted_at({"date_posted": "not a date"}) is None
+
+
+def test_filter_by_recency_keeps_only_results_within_cutoff():
+    now = datetime.now(timezone.utc)
+    results = [
+        {"source": "hasdata", "posted_at": now - timedelta(days=1)},
+        {"source": "hasdata", "posted_at": now - timedelta(days=10)},
+        {"source": "hasdata", "posted_at": None},
+    ]
+    kept = _filter_by_recency(results, posted_within_days=3)
+    assert len(kept) == 1
+    assert kept[0]["posted_at"] == results[0]["posted_at"]
+
+
+def test_filter_by_recency_ignores_unparseable_cutoff():
+    results = [{"source": "hasdata", "posted_at": None}]
+    assert _filter_by_recency(results, posted_within_days="not-a-number") == results
+
+
+async def test_search_applies_posted_within_days_filter_after_merging_sources():
+    now = datetime.now(timezone.utc)
+    recent = {**normalize_result("hasdata", RAW_RESULT), "posted_at": now - timedelta(hours=1)}
+    stale = {**normalize_result("hasdata", RAW_RESULT), "posted_at": now - timedelta(days=30)}
+
+    async def fake_search_source(source, query, filters):
+        return [recent, stale]
+
+    with patch("app.sources.mcp.explore.configured_sources", return_value=[HASDATA]), \
+         patch("app.sources.mcp.explore.search_source", side_effect=fake_search_source):
+        jobs = await search("backend engineer", {"posted_within_days": 1})
+
+    assert jobs == [recent]
+
+
+def test_normalize_result_truncates_float_salary_to_int():
+    # Live bug (2026-09-19): HasData returns salary as a float (e.g.
+    # 18590.084), and ExploreResultOut.salary_min is a plain `int` —
+    # pydantic 2 refuses to silently truncate a float with a fractional
+    # part into an int (`ValidationError: int_from_float`), which 500'd
+    # POST /explore/search for every source at once, not just HasData's,
+    # since results from all sources are validated together in the route.
+    row = {**RAW_RESULT, "salary_min": 18590.084, "salary_max": 25000.5}
+    job = normalize_result("hasdata", row)
+
+    assert job["salary_min"] == 18590
+    assert job["salary_max"] == 25000
 
 
 def test_extract_results_prefers_structured_content_list():
@@ -107,6 +180,43 @@ async def test_search_source_skips_when_no_search_tool_found():
 
     assert jobs == []
     mock_call.assert_not_called()
+
+
+async def test_search_source_skips_when_required_filter_missing():
+    required_tool = Tool(
+        name="search_jobs",
+        description="Search job postings",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "location": {"type": "string"}},
+            "required": ["location"],
+        },
+    )
+    with patch("app.sources.mcp.explore.list_tools", AsyncMock(return_value=[required_tool])), \
+         patch("app.sources.mcp.explore.call_tool", AsyncMock()) as mock_call:
+        jobs = await search_source(HASDATA, "backend engineer", {})
+
+    assert jobs == []
+    mock_call.assert_not_called()
+
+
+async def test_search_source_calls_when_required_filter_present():
+    required_tool = Tool(
+        name="search_jobs",
+        description="Search job postings",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "location": {"type": "string"}},
+            "required": ["location"],
+        },
+    )
+    call_result = CallToolResult(content=[], structured_content=[RAW_RESULT])
+    with patch("app.sources.mcp.explore.list_tools", AsyncMock(return_value=[required_tool])), \
+         patch("app.sources.mcp.explore.call_tool", AsyncMock(return_value=call_result)) as mock_call:
+        jobs = await search_source(HASDATA, "backend engineer", {"location": "Bangalore"})
+
+    assert len(jobs) == 1
+    mock_call.assert_called_once()
 
 
 async def test_search_source_returns_empty_on_tool_error():

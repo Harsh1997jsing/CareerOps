@@ -11,14 +11,20 @@ CLAUDE.md rule 2 (no LinkedIn/Naukri MCP connector, ever).
 import asyncio
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 
 from app.sources.common import (
     description_hash,
     normalize_employment_type,
     normalize_location,
+    safe_int,
     strip_html,
 )
-from app.sources.mcp.capabilities import CapabilityMatrix, build_capability_matrix
+from app.sources.mcp.capabilities import (
+    FILTER_PARAM_CANDIDATES,
+    CapabilityMatrix,
+    build_capability_matrix,
+)
 from app.sources.mcp.client import call_tool, list_tools
 from app.sources.mcp.registry import McpSource, configured_sources
 
@@ -99,16 +105,7 @@ def _build_search_arguments(tool, query: str, filters: dict) -> dict:
     if query_param:
         arguments[query_param] = query
 
-    filter_params = {
-        "location": ("location", "city", "region"),
-        "company": ("company", "employer"),
-        "employment_type": ("employment_type", "job_type", "commitment"),
-        "remote": ("remote", "is_remote", "work_model"),
-        "experience": ("experience", "seniority", "years"),
-        "skills": ("skills", "skill"),
-        "posted_within_days": ("hours_old", "posted_within_days", "date_posted"),
-    }
-    for filter_key, candidates in filter_params.items():
+    for filter_key, candidates in FILTER_PARAM_CANDIDATES.items():
         if filter_key not in filters:
             continue
         param_name = _first_present(schema, candidates)
@@ -139,6 +136,39 @@ def _as_text(value) -> str:
     return ""
 
 
+def _parse_posted_at(raw: dict) -> datetime | None:
+    """Derive a posting's timestamp from whatever date shape a source actually returns.
+
+    Confirmed live against HasData's Glassdoor tool: it has no absolute
+    date field at all, only an integer `ageInDays` (e.g. `10`) — so this
+    derives an approximate UTC timestamp from "now minus ageInDays" rather
+    than guessing at a date string format that doesn't exist for this
+    source. `posted_at`/`date_posted`/`postedDate` are kept as fallbacks
+    for a source that does return an absolute date (unconfirmed for Jobo —
+    its MCP auth is broken today, see registry.py's docstring — but a
+    plain ISO-ish string is the most common shape if it ever works).
+
+    Args:
+        raw: Raw job dict extracted from the MCP tool output.
+
+    Returns:
+        datetime | None: UTC timestamp, or None if no usable date info exists.
+    """
+    age_in_days = raw.get("ageInDays")
+    if isinstance(age_in_days, (int, float)):
+        return datetime.now(timezone.utc) - timedelta(days=age_in_days)
+
+    for key in ("posted_at", "date_posted", "postedDate", "posted_date"):
+        value = raw.get(key)
+        if not value:
+            continue
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+    return None
+
+
 def normalize_result(source_name: str, raw: dict) -> dict:
     """Normalize raw job dictionary from an MCP tool invocation into standard schema.
 
@@ -166,12 +196,9 @@ def normalize_result(source_name: str, raw: dict) -> dict:
         "description": description,
         "description_hash": description_hash(description),
         "employment_type": normalize_employment_type(raw.get("employment_type") or raw.get("job_type")),
-        # Each MCP server formats dates differently and this hasn't been
-        # observed against a live response yet — left unparsed rather than
-        # guessing a format; fill in once JOBO/HasData's real shape is known.
-        "posted_at": None,
-        "salary_min": raw.get("salary_min") or salary.get("min"),
-        "salary_max": raw.get("salary_max") or salary.get("max"),
+        "posted_at": _parse_posted_at(raw),
+        "salary_min": safe_int(raw.get("salary_min") or salary.get("min")),
+        "salary_max": safe_int(raw.get("salary_max") or salary.get("max")),
     }
 
 
@@ -255,6 +282,17 @@ async def search_source(source: McpSource, query: str, filters: dict) -> list[di
         logger.warning("%s exposes no recognizable search tool; skipping", source.name)
         return []
 
+    missing_required = [key for key in matrix.required_filters if key not in filters]
+    if missing_required:
+        # A call without these is guaranteed to fail against this source's
+        # own schema (e.g. HasData's Glassdoor tool requires "location") —
+        # skip the doomed round trip rather than making it and logging a
+        # tool-level error every time.
+        logger.warning(
+            "%s search skipped: missing required filter(s) %s", source.name, missing_required
+        )
+        return []
+
     arguments = _build_search_arguments(matrix.search_tool, query, filters)
     call_result = await call_tool(
         source.url, source.api_key, matrix.search_tool.name, arguments, source.auth_header
@@ -296,4 +334,49 @@ async def search(query: str, filters: dict | None = None) -> list[dict]:
             logger.warning("%s search failed: %s", source.name, outcome)
             continue
         results.extend(outcome)
+
+    posted_within_days = filters.get("posted_within_days")
+    if posted_within_days is not None:
+        results = _filter_by_recency(results, posted_within_days)
     return results
+
+
+def _filter_by_recency(results: list[dict], posted_within_days) -> list[dict]:
+    """Drop results whose posted_at is missing or older than the cutoff.
+
+    Applied here — after every source's results are merged — rather than
+    only as a per-source request argument (FILTER_PARAM_CANDIDATES'
+    "posted_within_days" entry still tries that too, for a source whose
+    tool actually accepts it), because HasData's Glassdoor search tool has
+    no date parameter at all (confirmed live: its schema is just
+    `keyword`/`location`/`sort`/`domain`/`nextPageToken`) — the only way to
+    honor "recent jobs only" against it is to filter its own results by
+    the `ageInDays` this derived posted_at from, after the fact.
+
+    A result with no derivable posted_at is dropped rather than kept "just
+    in case" when this filter is active — the caller explicitly asked for
+    recent-only, and an unknown age can't be confirmed to satisfy that.
+
+    Args:
+        results: Normalized results from every source, already merged.
+        posted_within_days: Maximum age in days, from ExploreSearchRequest.filters.
+
+    Returns:
+        list[dict]: Only the results posted within the cutoff.
+    """
+    try:
+        max_age_days = float(posted_within_days)
+    except (TypeError, ValueError):
+        return results
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    kept = []
+    for result in results:
+        posted_at = result.get("posted_at")
+        if posted_at is None:
+            continue
+        if posted_at.tzinfo is None:
+            posted_at = posted_at.replace(tzinfo=timezone.utc)
+        if posted_at >= cutoff:
+            kept.append(result)
+    return kept

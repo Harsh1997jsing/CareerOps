@@ -1,6 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
-from app.sources.targets import fetch_all_targets, ingest_all, load_company_targets
+from app.sources.targets import fetch_all_targets, ingest_all, load_company_targets, search_all
 
 COMPANIES_YAML = """
 greenhouse:
@@ -57,3 +57,13 @@ async def test_ingest_all_inserts_fetched_jobs():
 
     assert inserted == 2
     mock_insert.assert_called_once_with(mock_session, [GH_JOB, LEVER_JOB])
+
+
+async def test_search_all_returns_fetched_jobs_without_inserting():
+    with patch("app.sources.targets.fetch_all_targets", return_value=[GH_JOB, LEVER_JOB]) as mock_fetch, \
+         patch("app.sources.targets.insert_jobs", AsyncMock()) as mock_insert:
+        jobs = await search_all()
+
+    assert jobs == [GH_JOB, LEVER_JOB]
+    mock_fetch.assert_called_once()
+    mock_insert.assert_not_called()

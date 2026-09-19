@@ -8,7 +8,7 @@ for: don't fail the whole search when a source lacks a capability, just
 mark it unsupported and let explore.py work around it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcp.types import Tool
 
@@ -27,6 +27,26 @@ CAPABILITY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "apply_url": ("apply", "url", "link", "hosted_url"),
 }
 
+# Canonical filter key -> candidate schema property names a search tool
+# might call it, in priority order. Shared with explore.py's
+# _build_search_arguments() (which maps a filter dict onto a tool's actual
+# schema) so the same candidate list is used both to build arguments and
+# to work out, here, which of a tool's *required* properties correspond to
+# a filter the caller needs to supply.
+FILTER_PARAM_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "location": ("location", "city", "region"),
+    "company": ("company", "employer"),
+    "employment_type": ("employment_type", "job_type", "commitment"),
+    "remote": ("remote", "is_remote", "work_model"),
+    "experience": ("experience", "seniority", "years"),
+    "skills": ("skills", "skill"),
+    "posted_within_days": ("hours_old", "posted_within_days", "date_posted"),
+}
+
+_PROPERTY_TO_FILTER_KEY: dict[str, str] = {
+    prop: filter_key for filter_key, candidates in FILTER_PARAM_CANDIDATES.items() for prop in candidates
+}
+
 
 @dataclass
 class CapabilityMatrix:
@@ -36,10 +56,15 @@ class CapabilityMatrix:
         flags: Dictionary mapping capability name strings to support booleans.
         search_tool: The discovered Tool object to use for querying jobs, if supported.
         details_tool: The discovered Tool object to fetch job details, if supported.
+        required_filters: Canonical filter keys (see FILTER_PARAM_CANDIDATES)
+            that search_tool's own JSON Schema marks as required — a search
+            omitting one of these is guaranteed to fail against this source,
+            not just miss out on narrowing.
     """
     flags: dict[str, bool]
     search_tool: Tool | None
     details_tool: Tool | None
+    required_filters: list[str] = field(default_factory=list)
 
     def supports(self, capability: str) -> bool:
         """Check whether the MCP server supports a specific capability.
@@ -64,6 +89,30 @@ def _tool_text(tool: Tool) -> str:
     """
     schema_props = " ".join((tool.input_schema or {}).get("properties", {}).keys())
     return " ".join(filter(None, [tool.name, tool.description, schema_props])).lower()
+
+
+def _required_filter_keys(tool: Tool | None) -> list[str]:
+    """Map a tool's JSON Schema `required` properties onto canonical filter keys.
+
+    A tool's `input_schema["required"]` (standard JSON Schema) names raw
+    parameter properties (e.g. "location"), not the caller-facing filter
+    vocabulary this app searches with — this translates via
+    FILTER_PARAM_CANDIDATES the same way _build_search_arguments() maps the
+    other direction. A required property with no matching filter key
+    (e.g. the tool's own "query" param) is silently dropped rather than
+    surfaced as an unsatisfiable filter.
+
+    Args:
+        tool: The source's designated search tool, or None if it has none.
+
+    Returns:
+        list[str]: Canonical filter keys the caller must supply, sorted.
+    """
+    if tool is None:
+        return []
+    required_props = (tool.input_schema or {}).get("required") or []
+    keys = {_PROPERTY_TO_FILTER_KEY[prop] for prop in required_props if prop in _PROPERTY_TO_FILTER_KEY}
+    return sorted(keys)
 
 
 def _matches(text: str, keywords: tuple[str, ...]) -> bool:
@@ -119,4 +168,9 @@ def build_capability_matrix(tools: list[Tool]) -> CapabilityMatrix:
         None,
     )
 
-    return CapabilityMatrix(flags=flags, search_tool=search_tool, details_tool=details_tool)
+    return CapabilityMatrix(
+        flags=flags,
+        search_tool=search_tool,
+        details_tool=details_tool,
+        required_filters=_required_filter_keys(search_tool),
+    )

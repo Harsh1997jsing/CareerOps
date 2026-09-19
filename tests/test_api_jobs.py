@@ -61,14 +61,26 @@ def test_list_jobs_defaults_to_limit_50_offset_0():
     with patch("app.api.routes.jobs.jobs_service.list_jobs", AsyncMock(return_value=[])) as mock_list:
         client.get("/jobs")
 
-    assert mock_list.call_args.kwargs == {"limit": 50, "offset": 0}
+    assert mock_list.call_args.kwargs == {"limit": 50, "offset": 0, "q": None, "posted_within_days": None}
 
 
 def test_list_jobs_passes_custom_limit_and_offset():
     with patch("app.api.routes.jobs.jobs_service.list_jobs", AsyncMock(return_value=[])) as mock_list:
         client.get("/jobs?limit=10&offset=20")
 
-    assert mock_list.call_args.kwargs == {"limit": 10, "offset": 20}
+    assert mock_list.call_args.kwargs == {"limit": 10, "offset": 20, "q": None, "posted_within_days": None}
+
+
+def test_list_jobs_passes_q_and_posted_within_days_query_params():
+    with patch("app.api.routes.jobs.jobs_service.list_jobs", AsyncMock(return_value=[])) as mock_list:
+        client.get("/jobs?q=python&posted_within_days=3")
+
+    assert mock_list.call_args.kwargs == {"limit": 50, "offset": 0, "q": "python", "posted_within_days": 3}
+
+
+def test_list_jobs_rejects_posted_within_days_below_1():
+    response = client.get("/jobs?posted_within_days=0")
+    assert response.status_code == 422
 
 
 def test_list_jobs_rejects_limit_over_200():
@@ -104,6 +116,52 @@ def test_get_job_returns_null_application_when_none():
         response = client.get("/jobs/1")
 
     assert response.json()["application"] is None
+
+
+def test_reject_job_requires_authentication():
+    app.dependency_overrides.pop(get_current_user, None)
+    try:
+        response = client.post("/jobs/1/reject")
+    finally:
+        app.dependency_overrides[get_current_user] = lambda: FAKE_USER_CONTEXT
+
+    assert response.status_code == 401
+
+
+def test_reject_job_sets_status_and_returns_action():
+    job = MagicMock()
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.set_job_status", AsyncMock()) as mock_set:
+        response = client.post("/jobs/1/reject")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_id": 1, "status": "REJECTED"}
+    mock_set.assert_called_once_with(mock_set.call_args[0][0], job, "REJECTED")
+
+
+def test_reject_job_returns_404_when_missing():
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=None)):
+        response = client.post("/jobs/999/reject")
+
+    assert response.status_code == 404
+
+
+def test_restore_job_sets_status_and_returns_action():
+    job = MagicMock()
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.set_job_status", AsyncMock()) as mock_set:
+        response = client.post("/jobs/1/restore")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_id": 1, "status": "DISCOVERED"}
+    mock_set.assert_called_once_with(mock_set.call_args[0][0], job, "DISCOVERED")
+
+
+def test_restore_job_returns_404_when_missing():
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=None)):
+        response = client.post("/jobs/999/restore")
+
+    assert response.status_code == 404
 
 
 def test_list_documents_returns_mapped_items():

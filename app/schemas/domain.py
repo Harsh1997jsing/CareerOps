@@ -78,6 +78,7 @@ class JobListItem(BaseModel):
     location: str
     url: str
     status: str
+    posted_at: datetime | str | None = None
     fit_score: int | None = None
     confidence: str | None = None
     strong_matches: list[Any] = Field(default_factory=list)

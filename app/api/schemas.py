@@ -54,6 +54,7 @@ class JobListItemOut(BaseModel):
     location: str
     url: str
     status: str
+    posted_at: datetime | str | None = None
     fit_score: int | None
     confidence: str | None
     strong_matches: list
@@ -70,6 +71,17 @@ class JobDetailOut(JobListItemOut):
     """
     description: str
     application: ApplicationOut | None
+
+
+class JobStatusActionOut(BaseModel):
+    """Result of directly setting a job's own status (reject/restore).
+
+    Attributes:
+        job_id: Identifier of the updated job.
+        status: The job's status after the action.
+    """
+    job_id: int
+    status: str
 
 
 class GeneratedDocumentOut(BaseModel):
@@ -114,10 +126,15 @@ class ExploreSearchRequest(BaseModel):
 
 
 class ExploreResultOut(BaseModel):
-    """Normalized job posting returned from an MCP exploration search.
+    """A normalized, not-yet-saved job posting — the shared shape every
+    discovery source (MCP Explore, Greenhouse/Lever targets, JobSpy) hands
+    back to the frontend before the user picks which ones to add to the
+    Dashboard. Despite the name, this isn't Explore-specific: `/targets/search`
+    and `/scrape/jobspy` return the same shape, and all three pages save
+    through the same `/explore/save` route — see that route's docstring.
 
     Attributes:
-        source: Name of the MCP source connector providing the job.
+        source: Name of the originating source ('jobo', 'hasdata', 'greenhouse', 'lever', 'indeed', 'glassdoor', ...).
         source_job_id: Unique identifier for the job on the originating platform.
         company: Employer / company name.
         title: Job role or position title.
@@ -127,6 +144,8 @@ class ExploreResultOut(BaseModel):
         employment_type: Normalized employment type (e.g., 'Full-time'), if available.
         salary_min: Minimum compensation figure, if provided.
         salary_max: Maximum compensation figure, if provided.
+        posted_at: When the job was posted, if known (see mcp/explore.py for
+            how approximate this can be for some sources).
     """
     source: str
     source_job_id: str
@@ -135,13 +154,30 @@ class ExploreResultOut(BaseModel):
     location: str
     url: str
     description: str
-    employment_type: str | None
-    salary_min: int | None
-    salary_max: int | None
+    employment_type: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
+    # Deliberately `datetime | None`, not `datetime | str | None` like the
+    # ORM-backed *Out models elsewhere in this file. This type is used as a
+    # REQUEST body (ExploreSaveRequest extends it) as well as a response —
+    # live bug (2026-09-19): with `| str` in the union, pydantic's smart-
+    # union matching kept an incoming JSON date string as plain `str`
+    # rather than coercing it to `datetime`, so a search result's
+    # `posted_at` round-tripped back through POST /explore/save reached
+    # asyncpg as a raw string for a TIMESTAMP column and 500'd
+    # (`invalid input ... expected a datetime.date or datetime.datetime
+    # instance, got 'str'`) — which surfaces in a browser as a misleading
+    # CORS error, not the real 500, since the failed response never gets
+    # CORS headers. `datetime | None` alone parses an ISO string into a
+    # real `datetime` correctly; nothing here ever legitimately needs to
+    # pass a pre-formatted string (every source already produces
+    # `datetime | None` before this model is built).
+    posted_at: datetime | None = None
 
 
 class ExploreSaveRequest(ExploreResultOut):
-    """Payload to persist an explored MCP job into the local `jobs` database table."""
+    """Payload to persist any discovered job (Explore, a company target, or a
+    JobSpy scrape result) into the local `jobs` database table."""
     pass
 
 
@@ -159,8 +195,12 @@ class CapabilityMatrixOut(BaseModel):
 
     Attributes:
         flags: Mapping of capability names (e.g. 'search', 'location_filter') to support booleans.
+        required_filters: Canonical filter keys (e.g. 'location') this
+            source's search tool requires — omitting one guarantees a
+            failed search against this source, not just a broader one.
     """
     flags: dict[str, bool]
+    required_filters: list[str] = []
 
 
 class LoginRequest(BaseModel):
@@ -242,6 +282,38 @@ class TenantCreateRequest(BaseModel):
     """
     name: str
     slug: str = Field(min_length=1, max_length=63, pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+class CompanyTargetOut(BaseModel):
+    """One configured company target from data/companies.yaml.
+
+    Attributes:
+        source: Which adapter ingests this target ('greenhouse' or 'lever').
+        company: Display name of the company.
+        identifier: The board token (Greenhouse) or company slug (Lever)
+            used to fetch its postings.
+    """
+    source: str
+    company: str
+    identifier: str
+
+
+class ScrapeJobspyRequest(BaseModel):
+    """Request to run a multi-site JobSpy scrape.
+
+    Attributes:
+        search_term: Keywords or title query to scrape for.
+        location: Optional location query.
+        sites: Job sites to scrape — anything outside jobspy_source's
+            ALLOWED_SITES (no 'linkedin', ever — CLAUDE.md rule 2) is
+            silently dropped server-side, not rejected.
+        results_wanted: Target number of postings (capped server-side at
+            MAX_JOBS_PER_RUN = 50).
+    """
+    search_term: str
+    location: str | None = None
+    sites: list[str] | None = None
+    results_wanted: int = 50
 
 
 class TenantOut(BaseModel):

@@ -50,6 +50,44 @@ def test_normalize_job_falls_back_to_job_url_direct():
     assert job["url"] == "https://example.com/job/123"
 
 
+def test_normalize_job_handles_nan_job_type_without_crashing():
+    # Live bug (2026-09-19): jobspy_source's Glassdoor/Naukri/ZipRecruiter
+    # results frequently leave job_type unset, and pandas represents that
+    # as float('nan') in an object column, not None — `POST /scrape/jobspy`
+    # 500'd on this exact shape (AttributeError: 'float' object has no
+    # attribute 'strip'), not just in theory.
+    row = {**RAW_ROW, "job_type": float("nan")}
+    job = normalize_job(row)
+    assert job["employment_type"] is None
+
+
+def test_normalize_job_handles_nan_in_every_string_field_without_crashing():
+    nan = float("nan")
+    row = {
+        **RAW_ROW,
+        "site": nan,
+        "id": nan,
+        "company": nan,
+        "title": nan,
+        "location": nan,
+        "job_url": nan,
+        "job_url_direct": nan,
+        "description": nan,
+        "job_type": nan,
+    }
+    job = normalize_job(row)
+    assert job["source"] == "jobspy"
+    assert job["company"] == ""
+    assert job["title"] == ""
+    assert job["location"] == ""
+    assert job["url"] == ""
+    assert job["description"] == ""
+    assert job["employment_type"] is None
+    # id was NaN too, so this falls back to description_hash(url or description)[:16] —
+    # confirms it's a real hash, not the string "nan".
+    assert isinstance(job["source_job_id"], str) and job["source_job_id"] != "nan"
+
+
 def test_fetch_jobs_drops_linkedin_even_if_requested():
     df = pd.DataFrame([RAW_ROW])
     with patch("app.sources.jobspy_source.scrape_jobs", return_value=df) as mock_scrape:
@@ -69,6 +107,22 @@ def test_fetch_jobs_defaults_to_all_allowed_sites():
     called_sites = mock_scrape.call_args.kwargs["site_name"]
     assert "linkedin" not in called_sites
     assert set(called_sites) == {"indeed", "glassdoor", "naukri", "zip_recruiter", "google"}
+
+
+def test_fetch_jobs_defaults_country_indeed_to_india():
+    df = pd.DataFrame([RAW_ROW])
+    with patch("app.sources.jobspy_source.scrape_jobs", return_value=df) as mock_scrape:
+        fetch_jobs("backend engineer")
+
+    assert mock_scrape.call_args.kwargs["country_indeed"] == "india"
+
+
+def test_fetch_jobs_lets_caller_override_country_indeed():
+    df = pd.DataFrame([RAW_ROW])
+    with patch("app.sources.jobspy_source.scrape_jobs", return_value=df) as mock_scrape:
+        fetch_jobs("backend engineer", country_indeed="usa")
+
+    assert mock_scrape.call_args.kwargs["country_indeed"] == "usa"
 
 
 def test_fetch_jobs_returns_empty_list_when_only_linkedin_requested():

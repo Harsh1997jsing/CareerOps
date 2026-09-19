@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user, get_db
-from app.api.schemas import GeneratedDocumentOut, JobDetailOut, JobListItemOut
+from app.api.schemas import GeneratedDocumentOut, JobDetailOut, JobListItemOut, JobStatusActionOut
 from app.services import jobs as jobs_service
 
 router = APIRouter(tags=["jobs"], dependencies=[Depends(get_current_user)])
@@ -25,6 +25,8 @@ router = APIRouter(tags=["jobs"], dependencies=[Depends(get_current_user)])
 @router.get("/jobs", response_model=list[JobListItemOut])
 async def list_jobs(
     status: str | None = None,
+    q: str | None = None,
+    posted_within_days: int | None = Query(None, ge=1),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_db),
@@ -33,6 +35,9 @@ async def list_jobs(
 
     Args:
         status: Optional status filter (e.g. 'READY_FOR_REVIEW', 'APPROVED', 'REJECT').
+        q: Optional case-insensitive substring match against the job description.
+        posted_within_days: Optional recency filter — keeps only jobs
+            posted (or, lacking that, collected) within this many days.
         limit: Maximum rows to return (1-200, default 50). Audit finding F8 —
             previously unbounded.
         offset: Rows to skip, for paging past `limit`.
@@ -41,8 +46,54 @@ async def list_jobs(
     Returns:
         list[JobListItemOut]: Matching jobs with fit scores and qualification breakdown.
     """
-    items = await jobs_service.list_jobs(session, status, limit=limit, offset=offset)
+    items = await jobs_service.list_jobs(
+        session, status, limit=limit, offset=offset, q=q, posted_within_days=posted_within_days
+    )
     return [JobListItemOut.model_validate(item, from_attributes=True) for item in items]
+
+
+async def _get_job_or_404(session: AsyncSession, job_id: int):
+    job = await jobs_service.get_job_by_id(session, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@router.post("/jobs/{job_id}/reject", response_model=JobStatusActionOut)
+async def reject_job(job_id: int, session: AsyncSession = Depends(get_db)):
+    """Hide a job from the default Dashboard view by setting its status to REJECTED.
+
+    Sets `Job.status` directly rather than going through
+    /applications/{id}/reject — no Application row exists for any job
+    today (nothing in this codebase creates one yet), so that route is
+    unreachable here. Reversible via POST /jobs/{job_id}/restore.
+
+    Args:
+        job_id: Identifier of the job to reject.
+        session: Database session dependency.
+
+    Returns:
+        JobStatusActionOut: The job's id and its new status.
+    """
+    job = await _get_job_or_404(session, job_id)
+    await jobs_service.set_job_status(session, job, jobs_service.REJECTED_JOB_STATUS)
+    return JobStatusActionOut(job_id=job_id, status=jobs_service.REJECTED_JOB_STATUS)
+
+
+@router.post("/jobs/{job_id}/restore", response_model=JobStatusActionOut)
+async def restore_job(job_id: int, session: AsyncSession = Depends(get_db)):
+    """Undo a reject — sets a job's status back to DISCOVERED.
+
+    Args:
+        job_id: Identifier of the job to restore.
+        session: Database session dependency.
+
+    Returns:
+        JobStatusActionOut: The job's id and its new status.
+    """
+    job = await _get_job_or_404(session, job_id)
+    await jobs_service.set_job_status(session, job, jobs_service.DEFAULT_JOB_STATUS)
+    return JobStatusActionOut(job_id=job_id, status=jobs_service.DEFAULT_JOB_STATUS)
 
 
 @router.get("/jobs/{job_id}", response_model=JobDetailOut)

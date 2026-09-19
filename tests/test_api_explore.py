@@ -1,3 +1,4 @@
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -65,6 +66,26 @@ def test_capabilities_returns_flags_per_source():
     assert response.status_code == 200
     body = response.json()
     assert body["jobo"]["flags"]["search"] is True
+    assert body["jobo"]["required_filters"] == []
+
+
+def test_capabilities_surfaces_required_filters():
+    matrix = build_capability_matrix(
+        [
+            Tool(
+                name="search_jobs",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}, "location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            )
+        ]
+    )
+    with patch("app.api.routes.explore.mcp_explore.get_all_capabilities", AsyncMock(return_value={"hasdata": matrix})):
+        response = client.get("/explore/capabilities")
+
+    assert response.json()["hasdata"]["required_filters"] == ["location"]
 
 
 def test_save_inserts_job_and_reports_inserted_true():
@@ -76,6 +97,27 @@ def test_save_inserts_job_and_reports_inserted_true():
     job = mock_insert.call_args[0][1][0]
     assert job["source"] == "jobo"
     assert job["description_hash"] != RESULT["description_hash"]  # recomputed server-side, not trusted
+    # Live bug (2026-09-19): salary_min/salary_max were silently dropped
+    # here — HasData results have real salary data that never made it
+    # into the jobs table on save.
+    assert job["salary_min"] == 1000000
+    assert job["salary_max"] == 1500000
+
+
+def test_save_coerces_a_json_date_string_posted_at_into_a_real_datetime():
+    # Live bug (2026-09-19): ExploreResultOut.posted_at used to be typed
+    # `datetime | str | None` — pydantic's smart-union matching kept an
+    # incoming JSON string as plain `str` rather than coercing it, so this
+    # reached asyncpg as a raw string for a TIMESTAMP column and 500'd
+    # (manifesting in a browser as a misleading CORS error, since a failed
+    # response never gets CORS headers attached).
+    result = {**RESULT, "posted_at": "2026-07-18T09:21:36.070313Z"}
+    with patch("app.api.routes.explore.insert_jobs", AsyncMock(return_value=1)) as mock_insert:
+        response = client.post("/explore/save", json=result)
+
+    assert response.status_code == 200
+    job = mock_insert.call_args[0][1][0]
+    assert isinstance(job["posted_at"], datetime)
 
 
 def test_save_reports_inserted_false_for_a_duplicate():
@@ -83,3 +125,13 @@ def test_save_reports_inserted_false_for_a_duplicate():
         response = client.post("/explore/save", json=RESULT)
 
     assert response.json()["inserted"] is False
+
+
+def test_save_passes_posted_at_through_to_insert_jobs():
+    result = {**RESULT, "posted_at": "2026-09-10T00:00:00Z"}
+    with patch("app.api.routes.explore.insert_jobs", AsyncMock(return_value=1)) as mock_insert:
+        response = client.post("/explore/save", json=result)
+
+    assert response.status_code == 200
+    job = mock_insert.call_args[0][1][0]
+    assert job["posted_at"] is not None

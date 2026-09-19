@@ -1,7 +1,12 @@
-"""Explore endpoints for remote MCP job search and curation.
+"""Explore endpoints for remote MCP job search, plus the shared save route.
 
-Allows querying connected MCP servers for capabilities, fanning out live searches,
-and saving selected postings into the local `jobs` table.
+Allows querying connected MCP servers for capabilities and fanning out
+live searches. `/explore/save` is misleadingly named by history, not by
+current scope: it's the single "add this discovered job to the Dashboard"
+endpoint for every discovery source — Explore, `/targets/search`, and
+`/scrape/jobspy` all hand back the same `ExploreResultOut` shape and all
+save through here, so a job is never inserted until the user explicitly
+picks it, regardless of which page found it.
 
 Every route requires a valid bearer token (`Depends(get_current_user)` at
 the router level, audit finding F1).
@@ -33,7 +38,10 @@ async def capabilities():
             search and filter feature flags.
     """
     matrix = await mcp_explore.get_all_capabilities()
-    return {name: CapabilityMatrixOut(flags=capability.flags) for name, capability in matrix.items()}
+    return {
+        name: CapabilityMatrixOut(flags=capability.flags, required_filters=capability.required_filters)
+        for name, capability in matrix.items()
+    }
 
 
 @router.post("/search", response_model=list[ExploreResultOut])
@@ -52,12 +60,14 @@ async def search(payload: ExploreSearchRequest):
 
 @router.post("/save", response_model=ExploreSaveResponseOut)
 async def save(payload: ExploreSaveRequest, session: AsyncSession = Depends(get_db)):
-    """Persist a selected exploration result into the local `jobs` table.
+    """Persist a user-selected discovered job into the local `jobs` table.
 
-    Explore results aren't cached server-side (see mcp/explore.py), so
-    there's no id to save by — the frontend posts the result it already
-    has back here. Only way an Explore result enters `jobs`; the hash is
-    recomputed server-side rather than trusted from the client.
+    The shared save endpoint for Explore, `/targets/search`, and
+    `/scrape/jobspy` alike (see module docstring) — none of those results
+    are cached server-side, so there's no id to save by; the frontend
+    posts the full result it already has back here. This is the only way
+    any of them enters `jobs`; the description hash is recomputed
+    server-side rather than trusted from the client.
 
     Args:
         payload: ExploreSaveRequest containing full job posting details.
@@ -76,7 +86,9 @@ async def save(payload: ExploreSaveRequest, session: AsyncSession = Depends(get_
         "description": payload.description,
         "description_hash": description_hash(payload.description),
         "employment_type": payload.employment_type,
-        "posted_at": None,
+        "posted_at": payload.posted_at,
+        "salary_min": payload.salary_min,
+        "salary_max": payload.salary_max,
     }
     inserted = await insert_jobs(session, [job])
     return ExploreSaveResponseOut(inserted=bool(inserted))

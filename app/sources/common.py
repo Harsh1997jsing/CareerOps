@@ -7,7 +7,9 @@ already collected.
 """
 
 import hashlib
+import math
 import re
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +39,33 @@ EMPLOYMENT_TYPE_ALIASES = {
     "intern": "Internship",
     "internship": "Internship",
 }
+
+
+def safe_int(value) -> int | None:
+    """Safely coerce a numeric value (possibly a float, NaN, or string) to an int.
+
+    An MCP source's JSON can hand back a salary as a float (e.g. HasData:
+    `18590.084`), which pydantic's `int` field rejects outright rather than
+    truncating (`ValidationError: int_from_float`) — this crashed the whole
+    `/explore/search` response for every source, not just the offending
+    one, since ExploreResultOut construction happens after all sources'
+    results are merged (confirmed live). A pandas DataFrame cell (jobspy_source.py)
+    has the same float-or-NaN shape for the same reason.
+
+    Args:
+        value: Numeric value, NaN, string representation, or None.
+
+    Returns:
+        int | None: Converted integer, or None if input is None, NaN, or unparseable.
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def strip_html(html: str) -> str:
@@ -95,11 +124,16 @@ def normalize_employment_type(raw_type: str | None) -> str | None:
 
     Args:
         raw_type: Raw commitment or job type string (e.g. 'fulltime', 'part-time').
+            jobspy_source.py passes a pandas DataFrame cell straight through,
+            which is `float('nan')`, not `None`, for a missing value — an
+            `isinstance` check catches that (`not raw_type` alone doesn't:
+            `bool(float('nan'))` is `True` in Python, so a bare NaN slips
+            past that guard and crashes on `.strip()`).
 
     Returns:
         str | None: Canonical employment type (e.g. 'Full-time', 'Contract') or None.
     """
-    if not raw_type:
+    if not isinstance(raw_type, str) or not raw_type.strip():
         return None
     return EMPLOYMENT_TYPE_ALIASES.get(raw_type.strip().lower(), raw_type.strip())
 
@@ -129,6 +163,17 @@ async def insert_jobs(session: AsyncSession, jobs: list[dict]) -> int:
 
     inserted = 0
     for job in jobs:
+        posted_at = job.get("posted_at")
+        if isinstance(posted_at, datetime) and posted_at.tzinfo is not None:
+            # Job.posted_at is TIMESTAMP WITHOUT TIME ZONE (naive) — asyncpg
+            # raises DataError (not IntegrityError, so uncaught below) on a
+            # tz-aware value rather than silently dropping the offset.
+            # Live bug (2026-09-19): every source that parses its own raw
+            # date already produces a naive datetime, but a job posted back
+            # through /explore/save round-trips through JSON, where pydantic
+            # parses an ISO "...Z" string into a tz-aware UTC datetime —
+            # this is the one path that needs normalizing.
+            job = {**job, "posted_at": posted_at.replace(tzinfo=None)}
         try:
             async with session.begin_nested():
                 session.add(Job(**job))

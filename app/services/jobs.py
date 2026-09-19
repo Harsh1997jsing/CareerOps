@@ -7,7 +7,9 @@ one module per resource, matching the route split.
 Queries through app/models/'s ORM classes on an async Session.
 """
 
-from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,7 +17,27 @@ from app.models import GeneratedDocument, Job
 from app.schemas import GeneratedDocumentItem, JobDetail, JobListItem
 from app.services.applications import _application_to_item
 
-__all__ = ["list_jobs", "get_job", "list_generated_documents"]
+# Job.status values a job can be set to directly from the Dashboard. There
+# is currently no scoring pipeline that ever writes Job.status (confirmed:
+# nothing outside this module's own default reads/writes it) and no code
+# path ever creates an Application row for a job — so the existing
+# /applications/{id}/reject route is unreachable for every job in the
+# database today, not just unwired in the UI. REJECTED/DISCOVERED here are
+# a separate, honest mechanism: hide/unhide a job on the Dashboard by
+# mutating the job's own status directly, without pretending an
+# application-review workflow exists yet.
+REJECTED_JOB_STATUS = "REJECTED"
+DEFAULT_JOB_STATUS = "DISCOVERED"
+
+__all__ = [
+    "list_jobs",
+    "get_job",
+    "list_generated_documents",
+    "get_job_by_id",
+    "set_job_status",
+    "REJECTED_JOB_STATUS",
+    "DEFAULT_JOB_STATUS",
+]
 
 
 def _job_to_list_item(job: Job) -> JobListItem:
@@ -32,6 +54,10 @@ def _job_to_list_item(job: Job) -> JobListItem:
         location=job.location or "",
         url=job.url,
         status=job.status,
+        # Same fallback as the posted_within_days filter below: show the
+        # employer's actual posting date when known, otherwise when this
+        # app collected it — never leave the Dashboard with no date at all.
+        posted_at=job.posted_at or job.collected_at,
         fit_score=latest.fit_score if latest else None,
         confidence=latest.confidence if latest else None,
         strong_matches=(latest.strong_matches if latest else None) or [],
@@ -41,14 +67,31 @@ def _job_to_list_item(job: Job) -> JobListItem:
 
 
 async def list_jobs(
-    session: AsyncSession, status: str | None = None, limit: int = 50, offset: int = 0
+    session: AsyncSession,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    q: str | None = None,
+    posted_within_days: int | None = None,
 ) -> list[JobListItem]:
-    """List jobs with their latest analysis results, optionally filtered by status.
+    """List jobs with their latest analysis results, optionally filtered.
 
     `limit`/`offset` bound the result set (audit finding F8 — this query
     used to be unbounded). The route clamps `limit` to 1-200; this
     function trusts its caller rather than re-validating, since the only
     caller is that route.
+
+    Args:
+        q: Case-insensitive substring match against the job description —
+            works identically on Postgres and the SQLite test DB
+            (`.ilike()` compiles to `lower(x) LIKE lower(y)` where the
+            dialect has no native ILIKE).
+        posted_within_days: Keeps only jobs posted/collected within this
+            many days. Many sources never populate `posted_at` (only
+            HasData/jobspy currently do, and only sometimes) — falls back
+            to `collected_at` (always set, server-side, at insert time)
+            for a job with no known posting date, rather than dropping it
+            just because the *employer's* posting date is unknown.
     """
     stmt = (
         select(Job)
@@ -59,8 +102,30 @@ async def list_jobs(
     )
     if status:
         stmt = stmt.where(Job.status == status)
+    if q:
+        stmt = stmt.where(Job.description.ilike(f"%{q}%"))
+    if posted_within_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=posted_within_days)
+        stmt = stmt.where(func.coalesce(Job.posted_at, Job.collected_at) >= cutoff.replace(tzinfo=None))
     jobs = (await session.scalars(stmt)).all()
     return [_job_to_list_item(job) for job in jobs]
+
+
+async def get_job_by_id(session: AsyncSession, job_id: int) -> Job | None:
+    """Fetch the Job ORM row by id, for a route that needs to mutate it
+    directly (reject/restore) rather than read its mapped JobDetail shape."""
+    return await session.get(Job, job_id)
+
+
+async def set_job_status(session: AsyncSession, job: Job, status: str) -> None:
+    """Mutate and commit an already-loaded Job's status directly.
+
+    See REJECTED_JOB_STATUS's module-level comment for why this bypasses
+    the Application entity entirely rather than reusing
+    applications_service.set_status().
+    """
+    job.status = status
+    await session.commit()
 
 
 async def get_job(session: AsyncSession, job_id: int) -> JobDetail | None:

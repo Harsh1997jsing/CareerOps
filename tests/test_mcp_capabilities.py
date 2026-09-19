@@ -46,3 +46,25 @@ def test_empty_tool_list_yields_all_false():
     assert all(value is False for value in matrix.flags.values())
     assert matrix.search_tool is None
     assert matrix.details_tool is None
+    assert matrix.required_filters == []
+
+
+def test_required_filters_maps_schema_required_props_to_filter_keys():
+    tool = _tool(
+        "find_jobs",
+        properties={"query": {"type": "string"}, "location": {"type": "string"}},
+    )
+    tool.input_schema["required"] = ["query", "location"]
+
+    matrix = build_capability_matrix([tool])
+
+    # "query" has no matching filter key (it's the free-text search term,
+    # not a filter) so only "location" should surface.
+    assert matrix.required_filters == ["location"]
+
+
+def test_required_filters_empty_when_schema_has_no_required_array():
+    tool = _tool("find_jobs", properties={"location": {"type": "string"}})
+    matrix = build_capability_matrix([tool])
+
+    assert matrix.required_filters == []

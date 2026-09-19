@@ -6,6 +6,7 @@ from app/sources/jobspy_source.py (multi-site scrape) and the MCP explore
 connectors under app/sources/mcp/. See CLAUDE.md rule 2.
 """
 
+import asyncio
 import logging
 
 import yaml
@@ -63,13 +64,36 @@ def fetch_all_targets(path: str = COMPANIES_PATH) -> list[dict]:
     return jobs
 
 
+async def search_all(path: str = COMPANIES_PATH) -> list[dict]:
+    """Fetch postings from every configured company target without saving them.
+
+    Backs `POST /targets/search` — the Dashboard shows these to the user
+    first and only inserts the ones they explicitly pick (via
+    `/explore/save`, shared across every discovery source). Same
+    thread-offload reasoning as `ingest_all()` below, minus the DB write.
+
+    Args:
+        path: Filepath to company targets configuration.
+
+    Returns:
+        list[dict]: Normalized jobs, not yet persisted.
+    """
+    return await asyncio.to_thread(fetch_all_targets, path)
+
+
 async def ingest_all(session: AsyncSession, path: str = COMPANIES_PATH) -> int:
     """Fetch postings from all configured company targets and persist them to the database.
 
-    Fetches every configured target and inserts new postings into `jobs`.
+    Auto-inserts everything found, no per-job review — not what
+    `POST /targets/search` uses (see `search_all()` above; the Dashboard's
+    search-then-select-then-save flow needs the un-inserted list). Kept as
+    a standalone fetch-and-insert utility for scripted/REPL use, same
+    convenience role as `applications_service.set_application_status()`.
     Returns the number of rows actually inserted (excludes duplicates
-    already collected). Fetching itself (greenhouse/lever's `requests`
-    calls) stays synchronous — only the DB write is async.
+    already collected). Fetching itself (greenhouse/lever's blocking
+    `requests` calls) runs in a worker thread via `asyncio.to_thread` so a
+    slow board API doesn't stall the event loop for every other request;
+    the DB write stays on the calling task, same as before.
 
     Args:
         session: Database session.
@@ -78,5 +102,5 @@ async def ingest_all(session: AsyncSession, path: str = COMPANIES_PATH) -> int:
     Returns:
         int: Number of new jobs inserted.
     """
-    jobs = fetch_all_targets(path)
+    jobs = await asyncio.to_thread(fetch_all_targets, path)
     return await insert_jobs(session, jobs)
