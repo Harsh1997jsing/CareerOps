@@ -152,3 +152,29 @@ class GeneratedCoverLetter(BaseModel):
     """
     content: str
     evidence_ids_used: list[str]
+
+
+class ResumeEditSuggestion(BaseModel):
+    """A proposed revision to an already-generated resume, from user feedback.
+
+    Attributes:
+        sections: The full revised section list — every section, not just
+            the ones feedback touched (write_resume_docx needs the whole
+            set either way, and this keeps the shape identical to
+            ResumeGenerationResult.sections).
+        change_summary: One short sentence describing what changed and
+            why, shown to the user before they accept it.
+    """
+    sections: list[GeneratedResumeSection]
+    change_summary: str
+
+
+class CoverLetterEditSuggestion(BaseModel):
+    """A proposed revision to an already-generated cover letter, from user feedback.
+
+    Attributes:
+        content: The full revised cover letter body.
+        change_summary: One short sentence describing what changed and why.
+    """
+    content: str
+    change_summary: str

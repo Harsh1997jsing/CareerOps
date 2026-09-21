@@ -38,6 +38,7 @@ __all__ = [
     "list_jobs",
     "get_job",
     "list_generated_documents",
+    "get_generated_document",
     "get_job_by_id",
     "set_job_status",
     "hard_filter_job",
@@ -244,6 +245,27 @@ async def get_job(session: AsyncSession, job_id: int) -> JobDetail | None:
         risks=(latest.risks if latest else None) or [],
         application=_application_to_item(application) if application else None,
     )
+
+
+async def get_generated_document(session: AsyncSession, job_id: int, document_id: int) -> GeneratedDocument | None:
+    """Fetch one GeneratedDocument ORM row, scoped to a job.
+
+    Scoping by job_id (not just document_id) means a document_id that
+    exists but belongs to a different job 404s rather than leaking it —
+    used by the suggest-edit/apply-edit routes, which need the real ORM
+    row (content_json, type) rather than the flattened GeneratedDocumentItem.
+
+    Args:
+        session: Database session.
+        job_id: Job the document must belong to.
+        document_id: Primary key of the document.
+
+    Returns:
+        GeneratedDocument | None: The row, or None if it doesn't exist or
+            belongs to a different job.
+    """
+    stmt = select(GeneratedDocument).where(GeneratedDocument.id == document_id, GeneratedDocument.job_id == job_id)
+    return await session.scalar(stmt)
 
 
 async def list_generated_documents(session: AsyncSession, job_id: int) -> list[GeneratedDocumentItem]:

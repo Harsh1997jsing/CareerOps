@@ -12,6 +12,10 @@ Contains prompt templates for:
 - `CHAT_SEARCH_INTENT_PROMPT`: Extracts job-search filters from a chat message.
 - `CHAT_RESULT_SUMMARY_PROMPT`: Writes one-line summaries for a batch of
   staged search results in a single call.
+- `RESUME_EDIT_PROMPT` / `COVER_LETTER_EDIT_PROMPT`: Revise an
+  already-generated document from user feedback, one call, whole
+  document at once (not per-section) — for the suggest-then-confirm
+  document editing flow.
 """
 
 JOB_FIT_ANALYSIS_PROMPT = """You are analyzing whether a candidate is a good fit for a job.
@@ -144,4 +148,59 @@ POSTINGS:
 {listing}
 
 Return exactly one summary per posting, indexed to match the numbers above.
+"""
+
+RESUME_EDIT_PROMPT = """You are revising an already-generated resume based on
+the candidate's own feedback. Use ONLY information present in CANDIDATE
+EVIDENCE below — never invent skills, experience, metrics, companies, dates,
+or achievements that are not directly supported by an evidence entry, even
+if the feedback seems to ask for something not backed by evidence (in that
+case, note the limitation in change_summary instead of inventing a claim).
+
+Apply ONLY what the feedback asks for — leave every other section's content
+exactly as it is unless changing it is unavoidable (e.g. the feedback asks
+to shorten the whole resume). Return the full section list either way
+(write_resume_docx needs every section, not just the changed one).
+
+JOB DESCRIPTION:
+{job_description}
+
+CANDIDATE EVIDENCE:
+{evidence_yaml}
+
+CURRENT RESUME SECTIONS:
+{current_sections}
+
+CANDIDATE FEEDBACK:
+{feedback}
+
+Return the revised sections plus a one-sentence change_summary describing
+what you changed and why — specific enough that the candidate can decide
+whether to accept it without re-reading the whole resume.
+"""
+
+COVER_LETTER_EDIT_PROMPT = """You are revising an already-generated cover
+letter based on the candidate's own feedback. Use ONLY information present
+in CANDIDATE EVIDENCE below — never invent skills, experience, metrics, or
+achievements not directly supported by an evidence entry, even if the
+feedback seems to ask for something not backed by evidence (in that case,
+note the limitation in change_summary instead of inventing a claim).
+
+Apply ONLY what the feedback asks for — preserve the rest of the letter's
+content and voice unless the feedback requires a broader change.
+
+JOB DESCRIPTION:
+{job_description}
+
+CANDIDATE EVIDENCE:
+{evidence_yaml}
+
+CURRENT COVER LETTER:
+{current_content}
+
+CANDIDATE FEEDBACK:
+{feedback}
+
+Return the full revised letter plus a one-sentence change_summary
+describing what you changed and why.
 """

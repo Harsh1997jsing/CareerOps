@@ -5,7 +5,12 @@ from fastapi.testclient import TestClient
 from app.api.dependencies import get_current_user
 from app.api.main import app
 from app.core import get_db
-from app.llm.schemas import JobFitAnalysis
+from app.llm.schemas import (
+    CoverLetterEditSuggestion,
+    GeneratedResumeSection,
+    JobFitAnalysis,
+    ResumeEditSuggestion,
+)
 from app.models import GeneratedDocument
 from app.schemas import ApplicationItem, FilterResult, GeneratedDocumentItem, JobDetail, JobListItem
 from tests.conftest import FAKE_USER_CONTEXT
@@ -282,3 +287,125 @@ def test_generate_document_returns_generated_document():
     assert body["id"] == 9
     assert body["claim_check_passed"] is True
     mock_gen.assert_called_once_with(mock_gen.call_args[0][0], job, "resume")
+
+
+def test_suggest_document_edit_returns_404_when_document_missing():
+    job = MagicMock()
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=None)):
+        response = client.post("/jobs/1/documents/999/suggest-edit", json={"feedback": "make it shorter"})
+
+    assert response.status_code == 404
+
+
+def test_suggest_document_edit_resume_returns_current_and_proposed_sections():
+    job = MagicMock(description="Backend role")
+    document = GeneratedDocument(id=9, job_id=1, type="resume")
+    current_sections = [GeneratedResumeSection(section="summary", content="Old.", evidence_ids_used=[])]
+    suggestion = ResumeEditSuggestion(
+        sections=[GeneratedResumeSection(section="summary", content="New.", evidence_ids_used=[])],
+        change_summary="Shortened the summary.",
+    )
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=document)), \
+         patch("app.api.routes.jobs.document_generator.load_document_content", return_value=current_sections), \
+         patch("app.api.routes.jobs.document_editor.suggest_resume_edit", return_value=suggestion) as mock_suggest:
+        response = client.post("/jobs/1/documents/9/suggest-edit", json={"feedback": "make it shorter"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["change_summary"] == "Shortened the summary."
+    assert body["current_sections"][0]["content"] == "Old."
+    assert body["proposed_sections"][0]["content"] == "New."
+    assert body["current_content"] is None
+    mock_suggest.assert_called_once_with(
+        "Backend role", current_sections, "make it shorter", mock_suggest.call_args.args[3]
+    )
+
+
+def test_suggest_document_edit_cover_letter_returns_current_and_proposed_content():
+    job = MagicMock(description="Backend role")
+    document = GeneratedDocument(id=9, job_id=1, type="cover_letter")
+    suggestion = CoverLetterEditSuggestion(content="New letter.", change_summary="Shortened the opener.")
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=document)), \
+         patch("app.api.routes.jobs.document_generator.load_document_content", return_value="Old letter."), \
+         patch("app.api.routes.jobs.document_editor.suggest_cover_letter_edit", return_value=suggestion):
+        response = client.post("/jobs/1/documents/9/suggest-edit", json={"feedback": "shorten the opener"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["current_content"] == "Old letter."
+    assert body["proposed_content"] == "New letter."
+    assert body["current_sections"] is None
+
+
+def test_apply_document_edit_returns_404_when_document_missing():
+    job = MagicMock()
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=None)):
+        response = client.post("/jobs/1/documents/999/apply-edit", json={"content": "New letter."})
+
+    assert response.status_code == 404
+
+
+def test_apply_document_edit_resume_requires_sections():
+    job = MagicMock()
+    document = GeneratedDocument(id=9, job_id=1, type="resume")
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=document)):
+        response = client.post("/jobs/1/documents/9/apply-edit", json={"content": "wrong field"})
+
+    assert response.status_code == 422
+
+
+def test_apply_document_edit_resume_persists_and_returns_new_version():
+    job = MagicMock()
+    document = GeneratedDocument(id=9, job_id=1, type="resume")
+    new_version = GeneratedDocument(
+        id=10, job_id=1, type="resume", file_path="x.docx", version=2,
+        claim_check_passed=True, ats_check_passed=True,
+    )
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=document)), \
+         patch("app.api.routes.jobs.document_editor.apply_resume_edit", AsyncMock(return_value=new_version)) as mock_apply:
+        response = client.post(
+            "/jobs/1/documents/9/apply-edit",
+            json={"sections": [{"section": "summary", "content": "New.", "evidence_ids_used": []}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["version"] == 2
+    mock_apply.assert_called_once()
+
+
+def test_apply_document_edit_cover_letter_requires_content():
+    job = MagicMock()
+    document = GeneratedDocument(id=9, job_id=1, type="cover_letter")
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=document)):
+        response = client.post(
+            "/jobs/1/documents/9/apply-edit",
+            json={"sections": [{"section": "summary", "content": "wrong field", "evidence_ids_used": []}]},
+        )
+
+    assert response.status_code == 422
+
+
+def test_apply_document_edit_cover_letter_persists_and_returns_new_version():
+    job = MagicMock()
+    document = GeneratedDocument(id=9, job_id=1, type="cover_letter")
+    new_version = GeneratedDocument(
+        id=10, job_id=1, type="cover_letter", file_path="x.docx", version=2,
+        claim_check_passed=True, ats_check_passed=True,
+    )
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=document)), \
+         patch(
+             "app.api.routes.jobs.document_editor.apply_cover_letter_edit", AsyncMock(return_value=new_version)
+         ) as mock_apply:
+        response = client.post("/jobs/1/documents/9/apply-edit", json={"content": "New letter."})
+
+    assert response.status_code == 200
+    assert response.json()["version"] == 2
+    mock_apply.assert_called_once()

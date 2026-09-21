@@ -19,14 +19,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
 from app.api.schemas import (
+    ApplyDocumentEditRequest,
+    DocumentEditSuggestionOut,
     GenerateDocumentRequest,
     GeneratedDocumentOut,
     JobDetailOut,
     JobListItemOut,
     JobStatusActionOut,
+    ResumeSectionOut,
+    SuggestDocumentEditRequest,
 )
 from app.core import get_db
 from app.core.config import get_settings
+from app.llm.schemas import GeneratedResumeSection
+from app.services import document_editor
 from app.services import document_generator
 from app.services import job_scorer
 from app.services import jobs as jobs_service
@@ -217,3 +223,105 @@ async def generate_document(job_id: int, payload: GenerateDocumentRequest, sessi
     job = await _get_job_or_404(session, job_id)
     document = await document_generator.generate_document(session, job, payload.type)
     return GeneratedDocumentOut.model_validate(document, from_attributes=True)
+
+
+async def _get_document_or_404(session: AsyncSession, job_id: int, document_id: int):
+    document = await jobs_service.get_generated_document(session, job_id, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    return document
+
+
+@router.post("/jobs/{job_id}/documents/{document_id}/suggest-edit", response_model=DocumentEditSuggestionOut)
+async def suggest_document_edit(
+    job_id: int, document_id: int, payload: SuggestDocumentEditRequest, session: AsyncSession = Depends(get_db)
+):
+    """Propose a revision to an already-generated document from user feedback.
+
+    Read-only — one Claude call, no database write. See
+    app/services/document_editor.py's module docstring for the
+    suggest-then-confirm design; the caller posts the returned
+    proposed_sections/proposed_content back to apply-edit, unmodified, to
+    actually persist it.
+
+    Args:
+        job_id: Identifier of the job the document belongs to.
+        document_id: Identifier of the document to propose a revision for.
+        payload: The user's free-text edit request.
+        session: Database session dependency.
+
+    Returns:
+        DocumentEditSuggestionOut: Current vs. proposed content (the
+            resume pair or the cover-letter pair, matching the document's
+            type) plus a one-sentence change summary.
+
+    Raises:
+        HTTPException: 404 if the job or document doesn't exist (or the
+            document belongs to a different job).
+    """
+    job = await _get_job_or_404(session, job_id)
+    document = await _get_document_or_404(session, job_id, document_id)
+    settings = get_settings()
+    current = document_generator.load_document_content(document)
+
+    if document.type == "resume":
+        suggestion = await asyncio.to_thread(
+            document_editor.suggest_resume_edit, job.description, current, payload.feedback, settings.evidence_path
+        )
+        return DocumentEditSuggestionOut(
+            change_summary=suggestion.change_summary,
+            current_sections=[ResumeSectionOut(**s.model_dump()) for s in current],
+            proposed_sections=[ResumeSectionOut(**s.model_dump()) for s in suggestion.sections],
+        )
+
+    suggestion = await asyncio.to_thread(
+        document_editor.suggest_cover_letter_edit,
+        job.description, current, payload.feedback, settings.evidence_path,
+    )
+    return DocumentEditSuggestionOut(
+        change_summary=suggestion.change_summary,
+        current_content=current,
+        proposed_content=suggestion.content,
+    )
+
+
+@router.post("/jobs/{job_id}/documents/{document_id}/apply-edit", response_model=GeneratedDocumentOut)
+async def apply_document_edit(
+    job_id: int, document_id: int, payload: ApplyDocumentEditRequest, session: AsyncSession = Depends(get_db)
+):
+    """Persist an accepted document edit as a new version.
+
+    No Claude call here — `payload` is expected to be exactly what a
+    prior suggest-edit call returned as proposed_sections/proposed_content,
+    so what the user previewed is exactly what gets saved. Re-runs the
+    same claim/ATS validation gate a from-scratch generation does.
+
+    Args:
+        job_id: Identifier of the job the document belongs to.
+        document_id: Identifier of the document being edited (its type
+            determines whether `sections` or `content` is required).
+        payload: The accepted content.
+        session: Database session dependency.
+
+    Returns:
+        GeneratedDocumentOut: The new version's metadata.
+
+    Raises:
+        HTTPException: 404 if the job or document doesn't exist; 422 if
+            the wrong field was sent for this document's type.
+    """
+    job = await _get_job_or_404(session, job_id)
+    document = await _get_document_or_404(session, job_id, document_id)
+    settings = get_settings()
+
+    if document.type == "resume":
+        if payload.sections is None:
+            raise HTTPException(status_code=422, detail="sections required to edit a resume")
+        sections = [GeneratedResumeSection(**s.model_dump()) for s in payload.sections]
+        updated = await document_editor.apply_resume_edit(session, job, sections, settings.profile_path)
+    else:
+        if payload.content is None:
+            raise HTTPException(status_code=422, detail="content required to edit a cover letter")
+        updated = await document_editor.apply_cover_letter_edit(session, job, payload.content, settings.profile_path)
+
+    return GeneratedDocumentOut.model_validate(updated, from_attributes=True)

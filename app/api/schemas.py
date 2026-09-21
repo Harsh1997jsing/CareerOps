@@ -113,6 +113,71 @@ class GenerateDocumentRequest(BaseModel):
     type: Literal["resume", "cover_letter"]
 
 
+class ResumeSectionOut(BaseModel):
+    """One section of a resume — the wire shape of app/llm/schemas.py's
+    GeneratedResumeSection, kept separate per this file's own module
+    docstring (an LLM schema change shouldn't silently change the wire shape).
+
+    Attributes:
+        section: Section name ("summary", "skills", "experience", "projects", or "education").
+        content: Section text.
+        evidence_ids_used: Evidence identifiers referenced to construct this section.
+    """
+    section: str
+    content: str
+    evidence_ids_used: list[str]
+
+
+class SuggestDocumentEditRequest(BaseModel):
+    """Request to propose a revision to an already-generated document.
+
+    Attributes:
+        feedback: Free-text description of the desired change.
+    """
+    feedback: str
+
+
+class DocumentEditSuggestionOut(BaseModel):
+    """A proposed revision to an already-generated document — read-only,
+    nothing is persisted until it's posted back to apply-edit.
+
+    Exactly one of the resume pair (current_sections/proposed_sections)
+    or the cover-letter pair (current_content/proposed_content) is set,
+    matching the document's own type.
+
+    Attributes:
+        change_summary: One-sentence description of what changed and why.
+        current_sections: The resume's section list before this edit, if
+            it's a resume.
+        proposed_sections: The resume's proposed section list, if it's a
+            resume — send this back verbatim to apply-edit to accept it.
+        current_content: The cover letter's text before this edit, if
+            it's a cover letter.
+        proposed_content: The cover letter's proposed text, if it's a
+            cover letter — send this back verbatim to apply-edit to
+            accept it.
+    """
+    change_summary: str
+    current_sections: list[ResumeSectionOut] | None = None
+    proposed_sections: list[ResumeSectionOut] | None = None
+    current_content: str | None = None
+    proposed_content: str | None = None
+
+
+class ApplyDocumentEditRequest(BaseModel):
+    """Request to persist an accepted document edit — exactly one field set,
+    matching the document's type, both copied verbatim from a prior
+    DocumentEditSuggestionOut's proposed_sections/proposed_content (not
+    re-typed or re-derived) so what was previewed is exactly what saves.
+
+    Attributes:
+        sections: Accepted resume section list, for a "resume" document.
+        content: Accepted cover letter text, for a "cover_letter" document.
+    """
+    sections: list[ResumeSectionOut] | None = None
+    content: str | None = None
+
+
 class ApplicationActionOut(BaseModel):
     """Result of an application state transition action (approve, reject, open, mark-applied).
 

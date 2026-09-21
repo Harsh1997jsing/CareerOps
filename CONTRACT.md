@@ -21,7 +21,7 @@ request/response models) and `app/api/routes/*.py` (routes). `memory/api.md`
 has the full narrative version with rationale for *why* each thing is
 shaped the way it is.
 
-**Contract version: 6 — 2026-09-21**
+**Contract version: 7 — 2026-09-21**
 
 ---
 
@@ -51,6 +51,8 @@ shaped the way it is.
 | POST | `/jobs/{job_id}/restore` | bearer | — | `JobStatusActionOut` | 404. Undoes reject — sets `Job.status` back to `"DISCOVERED"` |
 | POST | `/jobs/{job_id}/analyze` | bearer | — | `JobDetailOut` | 404. Scores the job (`job_scorer`) against candidate skills/evidence/constraints, persists a new `JobAnalysis` row (additive — re-analyzing keeps history, doesn't replace), and updates `Job.status` to the resulting REJECT/READY_FOR_REVIEW/REVIEW_REQUIRED. Real Claude call — takes several seconds. |
 | POST | `/jobs/{job_id}/documents` | bearer | `GenerateDocumentRequest` | `GeneratedDocumentOut` | 404 job not found, 422 bad `type`. Generates a tailored resume or cover letter, writes it to `.docx` under `documents_dir` (local filesystem path, not a downloadable URL — see "Known gaps"), and runs claim/ATS validation. **Get-or-creates the job's `Application` row** — this, not a separate action, is what makes `/applications/{id}/*` reachable for a job. Several real Claude calls — can take 20s+. `claim_check_passed`/`ats_check_passed` can come back `null` if that specific check itself failed to run (e.g. ATS check needs LibreOffice on `PATH`) — `null` is "didn't run", not "passed". |
+| POST | `/jobs/{job_id}/documents/{document_id}/suggest-edit` | bearer | `SuggestDocumentEditRequest` | `DocumentEditSuggestionOut` | 404 job/document not found (document must belong to `job_id`). **Read-only** — one Claude call, no database write. Proposes a revision from free-text feedback; exactly one pair of `current_sections`/`proposed_sections` (resume) or `current_content`/`proposed_content` (cover letter) is set, matching the document's own type. |
+| POST | `/jobs/{job_id}/documents/{document_id}/apply-edit` | bearer | `ApplyDocumentEditRequest` | `GeneratedDocumentOut` | 404 job/document not found, 422 if the wrong field (`sections` vs `content`) was sent for this document's type. **No Claude call** — persists exactly the `sections`/`content` sent (intended to be a prior suggest-edit response's `proposed_sections`/`proposed_content`, unmodified) as a new document version, re-running claim/ATS validation the same as a fresh generation. |
 | POST | `/applications/{application_id}/approve` | bearer | — | `ApplicationActionOut` | 404 |
 | POST | `/applications/{application_id}/reject` | bearer | — | `ApplicationActionOut` | 404 |
 | POST | `/applications/{application_id}/open` | bearer | — | `ApplicationActionOut` | 404. Opens the posting URL **server-side** (`webbrowser.open`) — only meaningful when the frontend and API run on the same machine |
@@ -93,6 +95,11 @@ CompanyTargetOut        { source: string, company: string, identifier: string }
 ScrapeJobspyRequest     { search_term: string, location?: string, sites?: string[], results_wanted?: number = 50, experience?: string }
 
 GenerateDocumentRequest { type: "resume" | "cover_letter" }
+
+ResumeSectionOut        { section: string, content: string, evidence_ids_used: string[] }
+SuggestDocumentEditRequest { feedback: string }
+DocumentEditSuggestionOut { change_summary: string, current_sections?: ResumeSectionOut[], proposed_sections?: ResumeSectionOut[], current_content?: string, proposed_content?: string }
+ApplyDocumentEditRequest { sections?: ResumeSectionOut[], content?: string }
 
 ChatSearchResultOut      = ExploreResultOut & { id: number, summary?: string }  // id = staged-row id (see GET /chat/results); summary = one-line AI summary, batched per search
 ChatMessageRequest      { session_id: string, message: string, known_filters?: object = {} }  // known_filters: pass back the prior turn's `filters` verbatim

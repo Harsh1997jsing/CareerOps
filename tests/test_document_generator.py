@@ -1,9 +1,12 @@
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.llm.schemas import GeneratedResumeSection
+from app.models import GeneratedDocument
 from app.services.applications import get_application_for_job
 from app.services.cover_letter import CoverLetterResult
-from app.services.document_generator import generate_document
+from app.services.document_generator import generate_document, load_document_content
 from app.services.resume_generator import ResumeGenerationResult
 from tests.conftest import make_job
 
@@ -116,3 +119,43 @@ async def test_generate_document_reuses_existing_application(db_session, tmp_pat
 
     applications = (await db_session.scalars(select(Application).where(Application.job_id == job.id))).all()
     assert len(applications) == 1
+
+
+async def test_generate_document_persists_content_json_for_resume(db_session, tmp_path):
+    job = await make_job(db_session)
+    settings = _fake_settings(tmp_path)
+
+    with patch("app.services.document_generator.get_settings", return_value=settings), \
+         patch(
+             "app.services.document_generator.resume_generator_service.generate_resume",
+             return_value=_FAKE_RESUME_RESULT,
+         ), \
+         patch("app.services.document_generator.write_resume_docx"), \
+         patch("app.services.document_generator.document_review.review_generated_document", AsyncMock()):
+        document = await generate_document(db_session, job, "resume")
+
+    sections = load_document_content(document)
+    assert sections == _FAKE_RESUME_RESULT.sections
+
+
+async def test_generate_document_persists_content_json_for_cover_letter(db_session, tmp_path):
+    job = await make_job(db_session)
+    settings = _fake_settings(tmp_path)
+
+    with patch("app.services.document_generator.get_settings", return_value=settings), \
+         patch(
+             "app.services.document_generator.cover_letter_service.generate_cover_letter",
+             return_value=_FAKE_COVER_LETTER_RESULT,
+         ), \
+         patch("app.services.document_generator.write_cover_letter_docx"), \
+         patch("app.services.document_generator.document_review.review_generated_document", AsyncMock()):
+        document = await generate_document(db_session, job, "cover_letter")
+
+    content = load_document_content(document)
+    assert content == _FAKE_COVER_LETTER_RESULT.content
+
+
+def test_load_document_content_raises_without_stored_content():
+    document = GeneratedDocument(id=1, job_id=1, type="resume", content_json=None)
+    with pytest.raises(ValueError):
+        load_document_content(document)
