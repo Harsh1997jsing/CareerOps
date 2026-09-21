@@ -10,6 +10,7 @@ get-or-create, called here rather than requiring a separate "start
 application" click first (see its own docstring for why).
 """
 
+import asyncio
 import os
 from typing import Literal
 
@@ -77,15 +78,16 @@ async def generate_document(session: AsyncSession, job: Job, doc_type: DocumentT
     output_path = os.path.join(settings.documents_dir, f"job_{job.id}_{doc_type}_v{version}.docx")
 
     if doc_type == "resume":
-        result = resume_generator_service.generate_resume(
-            job.description, settings.skills_path, settings.evidence_path
+        result = await asyncio.to_thread(
+            resume_generator_service.generate_resume, job.description, settings.skills_path, settings.evidence_path
         )
         write_resume_docx(profile, result.sections, output_path)
         document_text = resume_document_text(result.sections)
         required_snippets = resume_required_snippets(profile, result.sections)
     else:
-        result = cover_letter_service.generate_cover_letter(
-            job.description, settings.evidence_path, settings.profile_path, settings.voice_samples_dir
+        result = await asyncio.to_thread(
+            cover_letter_service.generate_cover_letter,
+            job.description, settings.evidence_path, settings.profile_path, settings.voice_samples_dir,
         )
         write_cover_letter_docx(profile, result.content, output_path)
         document_text = result.content
@@ -98,6 +100,12 @@ async def generate_document(session: AsyncSession, job: Job, doc_type: DocumentT
     await session.commit()
     await session.refresh(document)
 
+    # review_generated_document() is itself async, but its own docstring
+    # is explicit that only its DB write is truly non-blocking — the
+    # Anthropic call (validate_claims) and the LibreOffice subprocess
+    # (validate_ats) inside it still run synchronously on this thread.
+    # That's an existing, documented scope boundary (see that module's
+    # docstring), not something introduced here.
     await document_review.review_generated_document(
         document.id, document_text, output_path, settings.evidence_path, required_snippets, settings.documents_dir
     )

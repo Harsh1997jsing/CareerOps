@@ -24,10 +24,17 @@ class ChatSearchResult(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     source: Mapped[str] = mapped_column(String, nullable=False)
-    source_job_id: Mapped[str | None] = mapped_column(String)
+    # Required, matching ExploreResultOut (app/api/schemas.py) — every
+    # source these rows are staged from (mcp_explore.search/
+    # jobspy_source.fetch_jobs/targets.search_all) already guarantees
+    # both, since ExploreResultOut requires them too. A staged row is
+    # posted straight to POST /explore/save (ExploreSaveRequest =
+    # ExploreResultOut) — nullable here would let a row pass staging and
+    # then 422 on save.
+    source_job_id: Mapped[str] = mapped_column(String, nullable=False)
     company: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
-    location: Mapped[str | None] = mapped_column(String)
+    location: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     employment_type: Mapped[str | None] = mapped_column(String)

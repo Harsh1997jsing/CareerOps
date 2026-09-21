@@ -15,6 +15,8 @@ Every route requires a valid bearer token (`Depends(get_current_user)` at
 the router level, same pattern as every other route module).
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +40,7 @@ async def send_message(payload: ChatMessageRequest, session: AsyncSession = Depe
         ChatMessageResponse: A clarifying reply (if more is needed) or a
             summary of newly staged results (if a search ran).
     """
-    intent = chat_search.extract_intent(payload.message, payload.known_filters)
+    intent = await asyncio.to_thread(chat_search.extract_intent, payload.message, payload.known_filters)
     filters = chat_search.intent_filters(intent)
 
     if not intent.ready_to_search:
@@ -51,7 +53,7 @@ async def send_message(payload: ChatMessageRequest, session: AsyncSession = Depe
         )
 
     raw_results = await chat_search.run_search(intent)
-    summaries = chat_search.summarize_results(raw_results)
+    summaries = await asyncio.to_thread(chat_search.summarize_results, raw_results)
     staged = await chat_search.stage_results(session, payload.session_id, raw_results, summaries)
     reply = (
         f"Found {len(staged)} matching job{'' if len(staged) == 1 else 's'}."

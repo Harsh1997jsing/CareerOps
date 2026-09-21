@@ -7,7 +7,7 @@ from app.api.main import app
 from app.core import get_db
 from app.llm.schemas import JobFitAnalysis
 from app.models import GeneratedDocument
-from app.schemas import ApplicationItem, GeneratedDocumentItem, JobDetail, JobListItem
+from app.schemas import ApplicationItem, FilterResult, GeneratedDocumentItem, JobDetail, JobListItem
 from tests.conftest import FAKE_USER_CONTEXT
 
 client = TestClient(app)
@@ -205,6 +205,7 @@ def test_analyze_job_scores_records_and_returns_updated_detail():
         strong_matches=["Python"], missing_requirements=[], risks=[], summary="Great fit.",
     )
     with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.hard_filter_job", return_value=FilterResult(passed=True)), \
          patch("app.api.routes.jobs.job_scorer.score_job", return_value=analysis) as mock_score, \
          patch("app.api.routes.jobs.job_scorer.decide", return_value="READY_FOR_REVIEW") as mock_decide, \
          patch("app.api.routes.jobs.jobs_service.record_analysis", AsyncMock()) as mock_record, \
@@ -218,6 +219,27 @@ def test_analyze_job_scores_records_and_returns_updated_detail():
     mock_record.assert_called_once_with(mock_record.call_args[0][0], job, analysis)
     mock_decide.assert_called_once_with(analysis)
     mock_set.assert_called_once_with(mock_set.call_args[0][0], job, "READY_FOR_REVIEW")
+
+
+def test_analyze_job_short_circuits_on_failed_hard_filter():
+    # CLAUDE.md: only jobs that pass hard_filters should ever reach the
+    # LLM scorer — a failing job is rejected without spending a Claude call.
+    job = MagicMock(description="Unpaid internship, Mumbai.")
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch(
+             "app.api.routes.jobs.jobs_service.hard_filter_job",
+             return_value=FilterResult(passed=False, reasons=["location 'Mumbai' not in allowed_locations"]),
+         ), \
+         patch("app.api.routes.jobs.job_scorer.score_job") as mock_score, \
+         patch("app.api.routes.jobs.jobs_service.record_analysis", AsyncMock()) as mock_record, \
+         patch("app.api.routes.jobs.jobs_service.set_job_status", AsyncMock()) as mock_set, \
+         patch("app.api.routes.jobs.jobs_service.get_job", AsyncMock(return_value=JOB_DETAIL)):
+        response = client.post("/jobs/1/analyze")
+
+    assert response.status_code == 200
+    mock_score.assert_not_called()
+    mock_record.assert_not_called()
+    mock_set.assert_called_once_with(mock_set.call_args[0][0], job, "REJECT")
 
 
 def test_generate_document_requires_authentication():

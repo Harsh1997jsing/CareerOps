@@ -1,10 +1,21 @@
 """
-Only jobs that pass hard_filters.py reach this module.
+Only jobs that pass hard_filters.py reach this module (enforced by
+app/services/jobs.py's hard_filter_job(), called from
+POST /jobs/{job_id}/analyze before this module's score_job()).
 """
 
 from app.llm.anthropic_client import structured_call
 from app.llm.prompts import JOB_FIT_ANALYSIS_PROMPT
 from app.llm.schemas import JobFitAnalysis
+
+# decide()'s possible outcomes, also used directly by
+# app/api/routes/jobs.py's analyze_job() when a job fails hard_filter_job()
+# and never reaches decide() at all (same terminal status either way: an
+# LLM-ineligible verdict and a deterministic-constraint failure both mean
+# "don't pursue this job").
+REJECT_STATUS = "REJECT"
+REVIEW_REQUIRED_STATUS = "REVIEW_REQUIRED"
+READY_FOR_REVIEW_STATUS = "READY_FOR_REVIEW"
 
 
 def score_job(job_description: str, skills_path: str, evidence_path: str, constraints_path: str) -> JobFitAnalysis:
@@ -58,9 +69,9 @@ def decide(analysis: JobFitAnalysis) -> str:
         str: Status string ('REJECT', 'READY_FOR_REVIEW', or 'REVIEW_REQUIRED').
     """
     if not analysis.eligible:
-        return "REJECT"
+        return REJECT_STATUS
     if analysis.confidence == "low" or len(analysis.risks) > 0:
-        return "REVIEW_REQUIRED"
+        return REVIEW_REQUIRED_STATUS
     if analysis.fit_score >= 75 and analysis.confidence in ("high", "medium"):
-        return "READY_FOR_REVIEW"
-    return "REVIEW_REQUIRED"
+        return READY_FOR_REVIEW_STATUS
+    return REVIEW_REQUIRED_STATUS

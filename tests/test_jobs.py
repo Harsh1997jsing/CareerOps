@@ -7,6 +7,7 @@ from app.services.jobs import (
     REJECTED_JOB_STATUS,
     get_job,
     get_job_by_id,
+    hard_filter_job,
     list_generated_documents,
     list_jobs,
     record_analysis,
@@ -214,3 +215,38 @@ async def test_record_analysis_is_additive_not_a_replace(db_session):
     refreshed = await get_job_by_id(db_session, job.id)
     await db_session.refresh(refreshed, attribute_names=["analyses"])
     assert {a.fit_score for a in refreshed.analyses} == {50, 90}
+
+
+def _write_constraints(tmp_path):
+    path = tmp_path / "constraints.yaml"
+    path.write_text(
+        "allowed_locations: [Remote, Bangalore]\n"
+        "employment_types: [Full-time]\n"
+        "minimum_experience_years: 0\n"
+        "acceptable_experience_gap_years: 1\n"
+        "exclude_keywords: [unpaid internship]\n"
+    )
+    return str(path)
+
+
+async def test_hard_filter_job_passes_within_constraints(db_session, tmp_path):
+    job = await make_job(db_session, location="Bangalore", employment_type="Full-time")
+    result = hard_filter_job(job, _write_constraints(tmp_path))
+    assert result.passed
+
+
+async def test_hard_filter_job_fails_disallowed_location(db_session, tmp_path):
+    job = await make_job(db_session, location="Mumbai", employment_type="Full-time")
+    result = hard_filter_job(job, _write_constraints(tmp_path))
+    assert not result.passed
+    assert any("location" in r for r in result.reasons)
+
+
+async def test_hard_filter_job_fails_excluded_keyword(db_session, tmp_path):
+    job = await make_job(
+        db_session, location="Remote", employment_type="Full-time",
+        description="This is an unpaid internship opportunity.",
+    )
+    result = hard_filter_job(job, _write_constraints(tmp_path))
+    assert not result.passed
+    assert any("excluded keyword" in r for r in result.reasons)

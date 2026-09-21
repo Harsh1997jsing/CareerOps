@@ -157,28 +157,52 @@ not generated:
      two sources.
 2. `app/services/hard_filters.py` — deterministic, non-LLM checks
    (`check_hard_filters`, `check_company_cooldown`). Only jobs that pass
-   these should ever reach the scorer.
+   these should ever reach the scorer — enforced by
+   `POST /jobs/{job_id}/analyze` (`app/api/routes/jobs.py`), which calls
+   `app/services/jobs.py`'s `hard_filter_job()` first and short-circuits to
+   `Job.status = job_scorer.REJECT_STATUS` without ever calling
+   `score_job()` if it fails (`years_required` never fires — nothing
+   populates that on `Job` at ingestion — but location/employment_type/
+   exclude_keywords all do).
 3. `app/services/job_scorer.py` — `score_job()` calls Claude for a
-   `JobFitAnalysis`; `decide()` turns it into `REJECT` / `REVIEW_REQUIRED` /
-   `READY_FOR_REVIEW` — never a single fit-score threshold; low confidence or
-   any listed risk forces `REVIEW_REQUIRED` regardless of score.
+   `JobFitAnalysis`; `decide()` turns it into `REJECT_STATUS` /
+   `REVIEW_REQUIRED_STATUS` / `READY_FOR_REVIEW_STATUS` — never a single
+   fit-score threshold; low confidence or any listed risk forces
+   `REVIEW_REQUIRED` regardless of score. `POST /jobs/{job_id}/analyze`
+   persists the result via `app/services/jobs.py`'s `record_analysis()`
+   (additive — a new `JobAnalysis` row per call, not a replace) and writes
+   `decide()`'s outcome to `Job.status`.
 4. `app/services/resume_generator.py` / `cover_letter.py` — generate DOCX
    documents (via shared `app/services/docx_writer.py`) strictly from
    `data/evidence.yaml` and `data/skills.yaml`/`data/profile.yaml`, never
-   from a previously generated document.
+   from a previously generated document. Orchestrated by
+   `app/services/document_generator.py`'s `generate_document()`
+   (`POST /jobs/{job_id}/documents`), which also get-or-creates the job's
+   `Application` row (`applications_service.create_application()`) —
+   generating a job's first document is what starts its real application
+   workflow now, not a separate action.
 5. `app/services/claim_validator.py` / `ats_validator.py`, gated through
    `app/services/document_review.py` — the only code path allowed to set
-   `generated_documents.claim_check_passed`/`ats_check_passed`.
+   `generated_documents.claim_check_passed`/`ats_check_passed`. Called from
+   `document_generator.generate_document()` right after writing the
+   `.docx`. `ats_validator`'s PDF round-trip check needs LibreOffice
+   (`soffice`) on `PATH` — not installed in this dev environment or in the
+   Dockerfile as of this writing; it raises `RuntimeError` when missing,
+   and the document row still persists with `ats_check_passed = null`
+   (not a false pass) rather than the whole request failing silently.
 6. `app/api/` (FastAPI, `uvicorn app.api.main:app --reload`) — the only
    review surface now; the Streamlit dashboard (`app/dashboard.py`) was
-   removed in favor of `../CareerOps-frontend` (React + Vite + TypeScript),
-   which is scaffolded with a Dashboard (real `GET /jobs` data) and Explore
-   page, though approve/reject and document-review UI don't exist yet —
-   see `memory/known-gaps.md`. `app/services/jobs.py` (list_jobs, get_job,
-   list_generated_documents) and `app/services/applications.py`
-   (get_application_context, approve/reject_application,
-   check_cooldown_for_company) are its DB layer — split by resource, not one
-   combined module. Approve/Reject sets `applications.status` to
+   removed in favor of `../CareerOps-frontend` (React + Vite + TypeScript).
+   Its sidebar is Dashboard + AI Search; a Job Detail page
+   (`/jobs/:jobId`) covers fit analysis, document generation, and
+   approve/reject/open/mark-applied — see `memory/known-gaps.md` for what
+   still isn't automatic (nothing triggers analyze/generate on its own;
+   it's all user-triggered per job). `app/services/jobs.py` (list_jobs,
+   get_job, list_generated_documents, hard_filter_job, record_analysis)
+   and `app/services/applications.py` (get_application_context,
+   create_application, approve/reject_application,
+   check_cooldown_for_company) are its DB layer — split by resource, not
+   one combined module. Approve/Reject sets `applications.status` to
    `APPROVED`/`REJECTED`. This is **not** the same as `APPLIED` — see next.
    Route handlers stay thin `async def` wrappers over an injected
    `AsyncSession`; new query logic belongs in `app/services/jobs.py` /

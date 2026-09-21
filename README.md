@@ -7,10 +7,14 @@ applications — but you always click submit yourself, in your own browser.
 
 All six originally planned phases are built (see `memory/` for what was
 built in each phase and why, and `memory/known-gaps.md` for what's still
-missing before this runs end-to-end — there's no orchestrator wiring the
-phases together yet). The API, migrations, and full Docker stack (Postgres +
-pgAdmin + the API itself) have been run and verified end-to-end against a
-real Postgres instance.
+missing). The score → generate → validate → apply half now runs as a real
+pipeline, user-triggered per job from the frontend's Job Detail page
+(`POST /jobs/{id}/analyze`, `POST /jobs/{id}/documents`) — but nothing
+automatically triggers it when a job is discovered/saved, and there's
+still no scheduler running ingestion on its own (`apscheduler` is in
+`requirements.txt`, unused). The API, migrations, and full Docker stack
+(Postgres + pgAdmin + the API itself) have been run and verified
+end-to-end against a real Postgres instance.
 
 ## Prerequisites
 
@@ -327,23 +331,33 @@ ingestion source paths (manual Greenhouse/Lever targets, JobSpy multi-site
 scrape, MCP explore — HasData's Glassdoor/Indeed tools verified against
 live data, Jobo blocked on OAuth support this backend doesn't have yet),
 a real SQLAlchemy ORM (`app/models/`) with Alembic migrations verified
-against a live Postgres instance, and an async FastAPI layer (`app/api/`,
-17 routes incl. multi-tenant JWT auth, every route but `/health`/
-`/auth/login` requiring a bearer token — see `memory/api.md`'s "Backend
-audit fixes" section) for a separate frontend (`../CareerOps-frontend` —
-React + Vite + TypeScript, scaffolded with a sidebar (Dashboard/Explore
-Jobs/Target/Job Scraping), JWT auth, and the Dashboard and Explore pages
-wired to real endpoints; Target and Job Scraping are placeholders since
-the backend has no HTTP routes for company-target or JobSpy ingestion yet
-— see its own `README.md`/`CONTRACT.md` and `memory/known-gaps.md`).
+against a live Postgres instance, and an async FastAPI layer (`app/api/`)
+for a separate frontend (`../CareerOps-frontend` — React + Vite +
+TypeScript, JWT auth). The apply pipeline itself — score → generate
+documents → validate → review → apply — is wired end-to-end now, not just
+built in isolation: `POST /jobs/{id}/analyze` and
+`POST /jobs/{id}/documents` (`app/api/routes/jobs.py`) run it per job, and
+the frontend's Job Detail page (`/jobs/:jobId`) is the review surface,
+including the approve/reject/open/mark-applied bar. It's all still
+user-triggered per job, not automatic on ingestion — see
+`memory/known-gaps.md`. The frontend's sidebar is Dashboard + AI Search
+(a chat-driven search that picks which of Explore/Scrape/Targets to use
+per query); those three stay mounted and reachable by direct URL, just
+off the nav now that AI Search covers their sources itself.
 
 A `Dockerfile` and `docker-compose.yml` run the frontend, API, Postgres,
 pgAdmin, and a one-off migration step as containers with a real dependency
 chain (db healthy → migrate → api healthy → frontend) and
 `restart: unless-stopped` on every long-running service — see "Running
-with Docker" above. 174 tests passing, 1 skipped pending a local
-LibreOffice install.
+with Docker" above. 271 tests passing, 1 skipped pending a local
+LibreOffice install (needed for `ats_validator`'s PDF round-trip check —
+also not yet in the `Dockerfile`, so the same gap exists in the container
+build, not just this dev machine).
 
-See `memory/known-gaps.md` for what's genuinely still missing (mainly: an
-orchestrator to run the phases as one pipeline, real data in place of the
-placeholder YAML files, and OAuth support for Jobo's MCP connector).
+See `memory/known-gaps.md` for what's genuinely still missing (mainly:
+nothing triggers analyze/generate automatically on ingestion, no
+scheduler exists despite `apscheduler` being a dependency, real data still
+needs to replace the placeholder YAML files — `data/voice_samples/` being
+empty means cover-letter generation will fail outright until at least one
+real writing sample is added — and OAuth support for Jobo's MCP
+connector).

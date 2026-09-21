@@ -201,10 +201,10 @@ class ChatSearchResultOut(BaseModel):
     """
     id: int
     source: str
-    source_job_id: str | None
+    source_job_id: str
     company: str
     title: str
-    location: str | None
+    location: str
     url: str
     description: str
     employment_type: str | None = None

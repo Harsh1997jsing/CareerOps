@@ -12,6 +12,8 @@ deliberate, documented scope boundary for this pass, not an oversight —
 see backend.md and memory/known-gaps.md.
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -148,27 +150,40 @@ async def list_documents(job_id: int, session: AsyncSession = Depends(get_db)):
 async def analyze_job(job_id: int, session: AsyncSession = Depends(get_db)):
     """Score a job's fit against candidate skills/evidence/constraints and record it.
 
-    Runs job_scorer.score_job() against the job's description, persists
-    the result as a new JobAnalysis row (job_scorer.decide()'s REJECT/
-    READY_FOR_REVIEW/REVIEW_REQUIRED outcome also becomes the job's new
-    Job.status), and returns the job's refreshed detail view. Re-running
-    this on an already-analyzed job adds a new analysis row rather than
-    replacing the old one — see jobs_service.record_analysis().
+    CLAUDE.md's pipeline order requires the deterministic hard filters
+    (location, employment type, excluded keywords) to run before a job
+    ever reaches the LLM scorer — a job that fails them is rejected
+    without spending a Claude call at all, and no JobAnalysis row is
+    created (there's nothing to score). A job that passes runs through
+    job_scorer.score_job(), which persists as a new JobAnalysis row
+    (job_scorer.decide()'s REJECT/READY_FOR_REVIEW/REVIEW_REQUIRED
+    outcome also becomes the job's new Job.status). Re-running this on an
+    already-analyzed job adds a new analysis row rather than replacing
+    the old one — see jobs_service.record_analysis().
 
     Args:
         job_id: Identifier of the job to score.
         session: Database session dependency.
 
     Returns:
-        JobDetailOut: The job's detail view with its new fit score/status.
+        JobDetailOut: The job's detail view with its new fit score/status
+            (unchanged fit score if hard-filtered — only Job.status moves
+            to REJECT).
 
     Raises:
         HTTPException: 404 if no job with `job_id` exists.
     """
     job = await _get_job_or_404(session, job_id)
     settings = get_settings()
-    analysis = job_scorer.score_job(
-        job.description, settings.skills_path, settings.evidence_path, settings.constraints_path
+
+    hard_filter_result = jobs_service.hard_filter_job(job, settings.constraints_path)
+    if not hard_filter_result.passed:
+        await jobs_service.set_job_status(session, job, job_scorer.REJECT_STATUS)
+        updated = await jobs_service.get_job(session, job_id)
+        return JobDetailOut.model_validate(updated, from_attributes=True)
+
+    analysis = await asyncio.to_thread(
+        job_scorer.score_job, job.description, settings.skills_path, settings.evidence_path, settings.constraints_path
     )
     await jobs_service.record_analysis(session, job, analysis)
     await jobs_service.set_job_status(session, job, job_scorer.decide(analysis))

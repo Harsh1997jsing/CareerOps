@@ -20,14 +20,25 @@ a larger, separate decision than this fix pass covers. If multi-tenant
 job data is ever actually wanted, start there, not with a bolt-on filter
 on the read routes.
 
-## No orchestration exists
+## Orchestration exists now, but only the review-and-generate half, and only on demand
 
-Nothing in this codebase calls "ingest → hard-filter → score → generate
-documents → validate → insert into `generated_documents`/`applications` →
-review → track" as one pipeline. Each phase's functions work and are
-tested in isolation, but there is no script or scheduler (`apscheduler` is
-in `requirements.txt` but unused) gluing them together. Building that
-orchestration is the largest remaining piece of work.
+`POST /jobs/{job_id}/analyze` (hard-filter → score → record) and
+`POST /jobs/{job_id}/documents` (generate → write .docx → claim/ATS
+validate → get-or-create `Application`) now call that chain for real —
+see `app/api/routes/jobs.py`, `app/services/jobs.py`'s `hard_filter_job()`/
+`record_analysis()`, and `app/services/document_generator.py`. Both are
+user-triggered per job from the frontend's Job Detail page, not automatic.
+
+What's still missing: **ingestion never triggers this automatically.**
+`app/sources/mcp/explore.py`'s `search()`, `app/sources/jobspy_source.py`'s
+`fetch_jobs()`, and `app/sources/targets.py`'s `search_all()` all still
+only stage results for manual review-then-save (`/explore/save`) — nothing
+runs hard-filter/score against a job the moment it's saved into `jobs`, so
+a saved job sits at `Job.status = "DISCOVERED"` until someone opens its
+Job Detail page and clicks Analyze. `apscheduler` (`requirements.txt`) is
+still unused — no recurring/scheduled ingestion or scoring run exists.
+Automating either of those (auto-analyze on save, or a scheduled ingest+
+analyze sweep) is the largest remaining piece of orchestration work.
 
 ## Placeholder data
 
@@ -99,44 +110,66 @@ What's actually been verified, and what still hasn't:
   it and run `pytest tests/test_ats_validator.py -v` to confirm the
   currently skipped `test_full_ats_roundtrip_with_real_libreoffice` passes.
 
-## Naming mismatch: `missing_requirements` vs `missing_skills`
+## Naming mismatch: `missing_requirements` vs `missing_skills` — now just a mapping, not a landmine
 
-`JobFitAnalysis.missing_requirements` (the Pydantic field the LLM call in
-`job_scorer.py` returns, in `app/llm/schemas.py`) and
-`JobAnalysis.missing_skills` (the ORM column, `app/models/job.py`) refer to
-the same concept under different names. This is harmless today because
-nothing writes a `JobFitAnalysis` into a `JobAnalysis` row yet (see "No
-orchestration" above) — but whoever adds that write path will need to
-either rename one of them for consistency or map explicitly between the
-two field names.
+`JobFitAnalysis.missing_requirements` (the LLM output field,
+`app/llm/schemas.py`) and `JobAnalysis.missing_skills` (the ORM column,
+`app/models/job.py`) still use different names for the same data — that
+part wasn't worth renaming, since `missing_requirements` reads better at
+the LLM-prompt layer and `missing_skills` matches `JobListItem`/
+`JobDetail`'s existing field name at the API layer. `app/services/jobs.py`'s
+`record_analysis()` is now the one place that writes a `JobFitAnalysis`
+into a `JobAnalysis` row, and it maps the two names explicitly (with a
+comment) — no other write path exists, so there's nothing left to get
+this wrong.
 
-## Review/approve UI still doesn't exist (list + explore UI now does)
+## Review/approve UI exists now
 
-`app/dashboard.py` (the Streamlit dashboard) was removed, superseded by
-`app/api/` + `../CareerOps-frontend`. The frontend is now scaffolded (React
-+ Vite + TypeScript, JWT auth, a sidebar with Dashboard/Explore Jobs/
-Target/Job Scraping) and its Dashboard (real `GET /jobs` list, status
-filter) and Explore (real `POST /explore/search`, `GET
-/explore/capabilities`) pages are wired to live endpoints and verified
-working. But there is still **no UI for approving/rejecting a job, viewing
-its fit analysis/generated documents side by side, or marking an
-application applied** — `JobReview`/`DocumentReview`/`ApproveRejectBar`
-from `../CareerOps-frontend/README.md`'s original spec were never built.
-Target and Job Scraping are placeholder pages, honestly labeled as such,
-since the backend has no HTTP routes for company-target or JobSpy
-ingestion (see "No orchestration exists" above — those two sources are
-only ever called from a Python REPL today, per `README.md`'s "Try job
-ingestion"). The only way to exercise approve/reject/mark-applied today is
-`GET /docs` on the running API, `curl`, or an `asyncio.run(...)`-wrapped
-Python REPL call into `app/services/applications.py`/`tracker.py` directly.
+`app/dashboard.py` (Streamlit) is still gone, superseded by `app/api/` +
+`../CareerOps-frontend`. The frontend's sidebar is now just Dashboard +
+AI Search (Explore/Target/Job Scraping stay mounted and routable, just
+off the nav — AI Search covers all three of their sources itself). A Job
+Detail page (`/jobs/:jobId`) now exists with the fit analysis, an
+Analyze/Re-analyze button (`POST /jobs/{id}/analyze`), the generated
+documents list with Generate Resume/Generate Cover Letter buttons
+(`POST /jobs/{id}/documents`), and the approve/reject/open/mark-applied
+bar — gated on `job.application` existing, which it doesn't until a
+document has been generated for that job at least once (see
+`applications_service.create_application()`'s docstring). Mark-applied
+requires an explicit confirm dialog, per CLAUDE.md rule 5.
 
 ## Approve vs. Applied are intentionally different states
 
 `POST /applications/{id}/approve` sets `applications.status` to
 `"APPROVED"`. Only `POST /applications/{id}/mark-applied` — which calls
 `app/services/tracker.py`'s `mark_applied()` with `confirmed=True`
-hardcoded in the route itself — sets it to `"APPLIED"`. There is currently
-no UI calling either endpoint (see above). Whatever review UI gets built
-must keep these as two distinct actions with separate confirmation steps
-(see `../CareerOps-frontend/README.md`'s rule 2) — never let "mark applied"
-be a side effect of "approve."
+hardcoded in the route itself — sets it to `"APPLIED"`. The Job Detail
+page's Approve/Reject/Mark applied buttons keep these as two distinct
+actions, per `../CareerOps-frontend/README.md`'s rule 2 — mark-applied
+has its own confirm dialog and is never a side effect of approve.
+
+## `Job.status` can be `"REJECT"`, distinct from `"REJECTED"` — a Dashboard filter had the wrong option
+
+`job_scorer.decide()` sets `Job.status` to `"REJECT"` (LLM found the
+candidate ineligible) or `POST /jobs/{job_id}/analyze` sets it directly
+to the same `"REJECT"` when `hard_filter_job()` fails first — both
+distinct from `"REJECTED"`, which only `POST /jobs/{job_id}/reject` (the
+Dashboard's manual hide action) sets. The Dashboard's status filter
+dropdown previously offered `"APPROVED"` as an option, which is never a
+valid `Job.status` value at all (it's an `Application.status` value) —
+fixed to offer `DISCOVERED`/`READY_FOR_REVIEW`/`REVIEW_REQUIRED`/
+`REJECT`/`REJECTED` instead.
+
+## `data/profile.yaml`/`data/evidence.yaml` are still placeholder data, and `data/voice_samples/` is still empty
+
+Confirmed still true as of this note: `data/profile.yaml` still has
+`"Your Name"`/`you@example.com`, `data/evidence.yaml` still has
+`"Company A"`, and `data/voice_samples/` has nothing but its own
+instructional `README.md`. Resume generation runs fine against
+placeholder data (it just produces a resume for "Your Name"), but
+`app/services/cover_letter.py`'s `generate_cover_letter()` calls
+`load_voice_samples()`, which **raises `NoVoiceSamplesError`** when the
+directory has no real `.txt`/`.md` samples — `POST /jobs/{id}/documents`
+with `type: "cover_letter"` will fail until at least one real writing
+sample is added. Nothing automated can fill these in; they're the
+candidate's own identity, evidence, and writing voice.

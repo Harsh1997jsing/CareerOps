@@ -102,23 +102,29 @@ async def run_search(intent: ChatSearchIntent) -> list[dict]:
         list[dict]: Normalized job postings, not yet staged or persisted.
     """
     filters = {k: v for k, v in intent_filters(intent).items() if k != "query"}
-    sources = intent.sources or ["explore"]
+    sources = set(intent.sources or ["explore"])
 
-    tasks = []
+    # Built as (name, task) pairs, not two parallel lists — zipping the
+    # outcomes back against a separately-filtered `sources` list (whatever
+    # order/duplicates the model returned) misattributed failures to the
+    # wrong source name whenever that order didn't match this function's
+    # own explore/scrape/targets build order.
+    task_specs: list[tuple[str, object]] = []
     if "explore" in sources:
-        tasks.append(mcp_explore.search(intent.query, filters))
+        task_specs.append(("explore", mcp_explore.search(intent.query, filters)))
     if "scrape" in sources:
-        tasks.append(
+        task_specs.append((
+            "scrape",
             asyncio.to_thread(
                 jobspy_source.fetch_jobs, intent.query, location=intent.location, experience=intent.experience
-            )
-        )
+            ),
+        ))
     if "targets" in sources:
-        tasks.append(targets_source.search_all(experience=intent.experience))
+        task_specs.append(("targets", targets_source.search_all(experience=intent.experience)))
 
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    outcomes = await asyncio.gather(*(task for _, task in task_specs), return_exceptions=True)
     results: list[dict] = []
-    for source_name, outcome in zip(sources, outcomes):
+    for (source_name, _), outcome in zip(task_specs, outcomes):
         if isinstance(outcome, Exception):
             logger.warning("chat search source %r failed: %s", source_name, outcome)
             continue

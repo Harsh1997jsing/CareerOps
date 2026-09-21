@@ -9,14 +9,16 @@ Queries through app/models/'s ORM classes on an async Session.
 
 from datetime import datetime, timedelta, timezone
 
+import yaml
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.llm.schemas import JobFitAnalysis
 from app.models import GeneratedDocument, Job, JobAnalysis
-from app.schemas import GeneratedDocumentItem, JobDetail, JobListItem
+from app.schemas import FilterResult, GeneratedDocumentItem, JobDetail, JobListItem
 from app.services.applications import _application_to_item
+from app.services.hard_filters import check_hard_filters
 
 # Job.status values a job can be set to directly from the Dashboard, kept
 # entirely separate from Application.status (APPROVED/REJECTED/APPLIED/
@@ -38,6 +40,7 @@ __all__ = [
     "list_generated_documents",
     "get_job_by_id",
     "set_job_status",
+    "hard_filter_job",
     "record_analysis",
     "REJECTED_JOB_STATUS",
     "DEFAULT_JOB_STATUS",
@@ -130,6 +133,36 @@ async def set_job_status(session: AsyncSession, job: Job, status: str) -> None:
     """
     job.status = status
     await session.commit()
+
+
+def hard_filter_job(job: Job, constraints_path: str) -> FilterResult:
+    """Run the deterministic, non-LLM checks a job must pass before scoring.
+
+    CLAUDE.md's pipeline order is explicit that "only jobs that pass these
+    should ever reach the scorer" — a job outside allowed_locations, an
+    excluded employment_type, or matching an exclude_keyword shouldn't
+    cost an LLM call to reject. `years_required` isn't a Job column
+    (nothing populates it at ingestion today), so that one check in
+    hard_filters.check_hard_filters() never fires here; every other check
+    does.
+
+    Args:
+        job: Already-loaded Job ORM row.
+        constraints_path: Path to constraints YAML (allowed_locations,
+            employment_types, minimum_experience_years,
+            acceptable_experience_gap_years, exclude_keywords).
+
+    Returns:
+        FilterResult: Whether the job passes, and why not if it doesn't.
+    """
+    with open(constraints_path) as f:
+        constraints = yaml.safe_load(f)
+    job_dict = {
+        "location": job.location,
+        "employment_type": job.employment_type,
+        "description": job.description,
+    }
+    return check_hard_filters(job_dict, constraints)
 
 
 async def record_analysis(session: AsyncSession, job: Job, analysis: JobFitAnalysis) -> JobAnalysis:

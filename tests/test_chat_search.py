@@ -103,6 +103,27 @@ async def test_run_search_skips_a_failing_source_without_aborting():
     assert results == [scrape_job]
 
 
+async def test_run_search_attributes_a_failure_to_the_right_source_regardless_of_intent_order():
+    # Regression: run_search() used to build its task list in a fixed
+    # explore/scrape/targets order but then zip() outcomes against
+    # intent.sources verbatim — whenever the model returned that list in
+    # a different order than a caller happened to request, a failure got
+    # logged under the wrong source name (results themselves were still
+    # correct; only the attribution was wrong).
+    intent = _intent(sources=["targets", "explore"])  # reversed vs. build order
+    explore_job = {**JOB, "source": "jobo"}
+    with patch("app.services.chat_search.mcp_explore.search", AsyncMock(return_value=[explore_job])), \
+         patch(
+             "app.services.chat_search.targets_source.search_all", AsyncMock(side_effect=RuntimeError("boom"))
+         ), \
+         patch("app.services.chat_search.logger") as mock_logger:
+        results = await run_search(intent)
+
+    assert results == [explore_job]
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args.args[1] == "targets"
+
+
 def test_summarize_results_returns_empty_list_for_no_jobs():
     assert summarize_results([]) == []
 
