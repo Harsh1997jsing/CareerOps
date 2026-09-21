@@ -185,6 +185,9 @@ class ChatSearchResultOut(BaseModel):
         source, source_job_id, company, title, location, url, description,
             employment_type, salary_min, salary_max, posted_at: Same as
             ExploreResultOut.
+        summary: One-line AI summary of the JD (see
+            app/services/chat_search.py's summarize_results), or None if
+            summarization wasn't run for this result.
     """
     id: int
     source: str
@@ -198,6 +201,7 @@ class ChatSearchResultOut(BaseModel):
     salary_min: int | None = None
     salary_max: int | None = None
     posted_at: datetime | None = None
+    summary: str | None = None
 
 
 class ChatMessageRequest(BaseModel):

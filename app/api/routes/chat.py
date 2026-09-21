@@ -1,13 +1,15 @@
 """Chat-driven job search.
 
-A single structured_call() (app/services/chat_search.py's extract_intent)
-turns each message into search filters — the only place an LLM touches
-this feature. Everything else is plain CRUD through the DB, same as
-Explore's search-then-select-then-save flow (see explore.py's module
-docstring): the chat is a natural-language front end onto the same
-search, not a new save path — saving a staged result goes through the
-existing shared POST /explore/save (ChatSearchResultOut is a superset of
-ExploreResultOut's fields), not a route defined here.
+A structured_call() (app/services/chat_search.py's extract_intent) turns
+each message into search filters plus which of Explore/Scrape/Targets to
+run it against; a second structured_call (summarize_results) batches
+one-line JD summaries for whatever gets staged. Those two calls are the
+only place an LLM touches this feature — everything else is plain CRUD
+through the DB, same as Explore's search-then-select-then-save flow (see
+explore.py's module docstring): the chat is a natural-language front end
+onto the same searches, not a new save path — saving a staged result goes
+through the existing shared POST /explore/save (ChatSearchResultOut is a
+superset of ExploreResultOut's fields), not a route defined here.
 
 Every route requires a valid bearer token (`Depends(get_current_user)` at
 the router level, same pattern as every other route module).
@@ -49,7 +51,8 @@ async def send_message(payload: ChatMessageRequest, session: AsyncSession = Depe
         )
 
     raw_results = await chat_search.run_search(intent)
-    staged = await chat_search.stage_results(session, payload.session_id, raw_results)
+    summaries = chat_search.summarize_results(raw_results)
+    staged = await chat_search.stage_results(session, payload.session_id, raw_results, summaries)
     reply = (
         f"Found {len(staged)} matching job{'' if len(staged) == 1 else 's'}."
         if staged

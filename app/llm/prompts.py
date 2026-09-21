@@ -10,6 +10,8 @@ Contains prompt templates for:
 - `CLAIM_CHECK_PROMPT`: Fact-checks generated documents strictly against candidate
   evidence IDs to block unsupported claims.
 - `CHAT_SEARCH_INTENT_PROMPT`: Extracts job-search filters from a chat message.
+- `CHAT_RESULT_SUMMARY_PROMPT`: Writes one-line summaries for a batch of
+  staged search results in a single call.
 """
 
 JOB_FIT_ANALYSIS_PROMPT = """You are analyzing whether a candidate is a good fit for a job.
@@ -115,12 +117,31 @@ Extract:
   already confirmed above if this message only adds detail to it).
 - location, experience, posted_within_days, company: set only if mentioned
   in this message or already confirmed above.
+- sources: pick from "explore" (broad multi-source search, the default),
+  "scrape" (a direct multi-site scrape — pick this when the user names a
+  specific site like Indeed/Naukri/Glassdoor, or explicitly says
+  "scrape"), "targets" (the user's own tracked company list — pick this
+  when the message is about a specific company on their target list, or
+  says "my target companies"). Default to ["explore"] alone unless the
+  message clearly implies otherwise; include more than one if it implies
+  more than one.
 - ready_to_search: true once there's a usable `query` — location,
-  experience, company, and posted_within_days are optional narrowing
-  filters, never required to run a search.
+  experience, company, posted_within_days, and sources are optional
+  narrowing filters, never required to run a search.
 - clarification_question: set only if `query` is still missing or too
   vague to search on at all (e.g. "find me a job"); ask ONE short,
   specific question. Leave it null once ready_to_search is true.
 
 Never invent a filter value that wasn't stated.
+"""
+
+CHAT_RESULT_SUMMARY_PROMPT = """You are summarizing job search results for
+CareerOps. For each numbered posting below, write ONE short sentence (under
+20 words) capturing the role, level, and any standout requirement — do not
+just restate the title and company.
+
+POSTINGS:
+{listing}
+
+Return exactly one summary per posting, indexed to match the numbers above.
 """

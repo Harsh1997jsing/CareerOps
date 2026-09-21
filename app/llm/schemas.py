@@ -92,6 +92,16 @@ class ChatSearchIntent(BaseModel):
             or None if not mentioned.
         posted_within_days: Recency filter in days, or None if not mentioned.
         company: A specific company the user named, or None.
+        sources: Which of the app's three search sources to run this
+            query against — "explore" (broad MCP search, the default),
+            "scrape" (direct multi-site JobSpy scrape — pick this when
+            the user names a specific site like Indeed/Naukri/Glassdoor,
+            or explicitly asks to "scrape"), "targets" (the user's
+            configured company target list — pick this when `company`
+            names one of the user's own tracked companies, or the
+            message is about "my target companies"). Pick more than one
+            when the message implies it; default to ["explore"] alone
+            when nothing suggests otherwise.
         ready_to_search: True once `query` alone is usable — location,
             experience, company, and posted_within_days are optional
             narrowing filters, never required to run a search.
@@ -104,8 +114,33 @@ class ChatSearchIntent(BaseModel):
     experience: str | None = None
     posted_within_days: int | None = None
     company: str | None = None
+    sources: list[Literal["explore", "scrape", "targets"]] = ["explore"]
     ready_to_search: bool
     clarification_question: str | None = None
+
+
+class JobSummaryItem(BaseModel):
+    """One staged result's one-line AI summary.
+
+    Attributes:
+        index: Position of this job in the list that was summarized
+            (0-based) — maps the summary back onto its result without
+            needing a database id yet (summarization runs before staging).
+        summary: A single short sentence capturing the role, level, and
+            any standout requirement — not a restatement of the title.
+    """
+    index: int
+    summary: str
+
+
+class ChatResultSummaries(BaseModel):
+    """Batch of one-line summaries for a set of staged search results.
+
+    Attributes:
+        summaries: One JobSummaryItem per input job, same count and order
+            as the jobs that were summarized.
+    """
+    summaries: list[JobSummaryItem]
 
 
 class GeneratedCoverLetter(BaseModel):

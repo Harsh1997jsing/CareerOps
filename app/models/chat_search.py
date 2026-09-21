@@ -34,4 +34,5 @@ class ChatSearchResult(Base):
     salary_min: Mapped[int | None] = mapped_column(Integer)
     salary_max: Mapped[int | None] = mapped_column(Integer)
     posted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)

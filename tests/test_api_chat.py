@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -16,8 +16,8 @@ app.dependency_overrides[get_current_user] = lambda: FAKE_USER_CONTEXT
 def _intent(**overrides):
     defaults = dict(
         query="backend engineer", location=None, experience=None,
-        posted_within_days=None, company=None, ready_to_search=True,
-        clarification_question=None,
+        posted_within_days=None, company=None, sources=["explore"],
+        ready_to_search=True, clarification_question=None,
     )
     return ChatSearchIntent(**{**defaults, **overrides})
 
@@ -27,7 +27,7 @@ def _staged_row(**overrides):
         id=1, session_id="sess-1", source="jobo", source_job_id="j1", company="Acme",
         title="Backend Engineer", location="Bangalore", url="https://example.com/apply/j1",
         description="Build things", employment_type="Full-time", salary_min=None,
-        salary_max=None, posted_at=None,
+        salary_max=None, posted_at=None, summary=None,
     )
     return ChatSearchResult(**{**defaults, **overrides})
 
@@ -61,7 +61,8 @@ def test_send_message_searches_and_stages_when_ready():
     staged = [_staged_row()]
     with patch("app.api.routes.chat.chat_search.extract_intent", return_value=intent), \
          patch("app.api.routes.chat.chat_search.run_search", AsyncMock(return_value=[{"source": "jobo"}])), \
-         patch("app.api.routes.chat.chat_search.stage_results", AsyncMock(return_value=staged)):
+         patch("app.api.routes.chat.chat_search.summarize_results", return_value=["Backend role"]) as mock_summarize, \
+         patch("app.api.routes.chat.chat_search.stage_results", AsyncMock(return_value=staged)) as mock_stage:
         response = client.post(
             "/chat/message", json={"session_id": "sess-1", "message": "backend engineer in Bangalore"}
         )
@@ -72,6 +73,8 @@ def test_send_message_searches_and_stages_when_ready():
     assert "Found 1 matching job" in body["reply"]
     assert len(body["results"]) == 1
     assert body["results"][0]["company"] == "Acme"
+    mock_summarize.assert_called_once_with([{"source": "jobo"}])
+    mock_stage.assert_called_once_with(ANY, "sess-1", [{"source": "jobo"}], ["Backend role"])
 
 
 def test_send_message_replies_when_nothing_found():
