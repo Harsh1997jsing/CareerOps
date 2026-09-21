@@ -9,6 +9,7 @@ Contains prompt templates for:
   and evidence.
 - `CLAIM_CHECK_PROMPT`: Fact-checks generated documents strictly against candidate
   evidence IDs to block unsupported claims.
+- `CHAT_SEARCH_INTENT_PROMPT`: Extracts job-search filters from a chat message.
 """
 
 JOB_FIT_ANALYSIS_PROMPT = """You are analyzing whether a candidate is a good fit for a job.
@@ -97,4 +98,29 @@ GENERATED TEXT:
 
 EVIDENCE:
 {evidence_yaml}
+"""
+
+CHAT_SEARCH_INTENT_PROMPT = """You are the search assistant for CareerOps, a job
+search tool. Extract structured job-search filters from the user's message below.
+
+FILTERS ALREADY CONFIRMED EARLIER IN THIS CONVERSATION (carry these forward
+unless this message changes them):
+{known_filters}
+
+USER MESSAGE:
+{message}
+
+Extract:
+- query: job title/role/keywords to search for (combine with any query
+  already confirmed above if this message only adds detail to it).
+- location, experience, posted_within_days, company: set only if mentioned
+  in this message or already confirmed above.
+- ready_to_search: true once there's a usable `query` — location,
+  experience, company, and posted_within_days are optional narrowing
+  filters, never required to run a search.
+- clarification_question: set only if `query` is still missing or too
+  vague to search on at all (e.g. "find me a job"); ask ONE short,
+  specific question. Leave it null once ready_to_search is true.
+
+Never invent a filter value that wasn't stated.
 """

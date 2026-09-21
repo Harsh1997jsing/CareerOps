@@ -81,6 +81,33 @@ class GeneratedResumeSection(BaseModel):
     evidence_ids_used: list[str]
 
 
+class ChatSearchIntent(BaseModel):
+    """Search filters extracted from a free-text chat message.
+
+    Attributes:
+        query: Job title/role/keywords to search for — "" if the message
+            doesn't contain enough to search on yet.
+        location: Location filter, or None if not mentioned.
+        experience: Experience-level filter (e.g. "senior", "3-5 years"),
+            or None if not mentioned.
+        posted_within_days: Recency filter in days, or None if not mentioned.
+        company: A specific company the user named, or None.
+        ready_to_search: True once `query` alone is usable — location,
+            experience, company, and posted_within_days are optional
+            narrowing filters, never required to run a search.
+        clarification_question: A single short question to ask when
+            `query` itself is still missing or too vague to search on;
+            None once ready_to_search is true.
+    """
+    query: str
+    location: str | None = None
+    experience: str | None = None
+    posted_within_days: int | None = None
+    company: str | None = None
+    ready_to_search: bool
+    clarification_question: str | None = None
+
+
 class GeneratedCoverLetter(BaseModel):
     """Generated cover letter tailored to a job and styled after candidate voice samples.
 

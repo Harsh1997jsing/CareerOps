@@ -175,6 +175,66 @@ class ExploreResultOut(BaseModel):
     posted_at: datetime | None = None
 
 
+class ChatSearchResultOut(BaseModel):
+    """A staged chat-search result — ExploreResultOut's shape plus the staged
+    row's own id, so a chat turn can reference it (e.g. to save it) without
+    resending its full description back through the API or the model.
+
+    Attributes:
+        id: Database id of this staged row (see app/models/chat_search.py).
+        source, source_job_id, company, title, location, url, description,
+            employment_type, salary_min, salary_max, posted_at: Same as
+            ExploreResultOut.
+    """
+    id: int
+    source: str
+    source_job_id: str | None
+    company: str
+    title: str
+    location: str | None
+    url: str
+    description: str
+    employment_type: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
+    posted_at: datetime | None = None
+
+
+class ChatMessageRequest(BaseModel):
+    """One turn of the chat search — a message plus filters already confirmed
+    in this conversation, carried forward by the caller rather than
+    reconstructed server-side from a stored transcript (see
+    app/services/chat_search.py's module docstring).
+
+    Attributes:
+        session_id: Client-generated id identifying this chat conversation
+            (also scopes staged results — see GET /chat/results/{session_id}).
+        message: The user's latest chat message.
+        known_filters: Filters already confirmed earlier in this
+            conversation, as returned by a prior turn's `filters`.
+    """
+    session_id: str
+    message: str
+    known_filters: dict = {}
+
+
+class ChatMessageResponse(BaseModel):
+    """Result of one chat search turn.
+
+    Attributes:
+        reply: Short natural-language reply — either a clarifying question
+            or a summary of what the search found.
+        filters: The filters now confirmed for this conversation (pass
+            back as `known_filters` on the next turn).
+        ready: True if a search was actually run this turn.
+        results: Newly staged results, if `ready` is true; empty otherwise.
+    """
+    reply: str
+    filters: dict
+    ready: bool
+    results: list[ChatSearchResultOut] = []
+
+
 class ExploreSaveRequest(ExploreResultOut):
     """Payload to persist any discovered job (Explore, a company target, or a
     JobSpy scrape result) into the local `jobs` database table."""
