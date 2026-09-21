@@ -7,7 +7,9 @@ and standardized application exception classes.
 from app.core.config import Settings, get_settings
 from app.core.database import (
     check_database_health,
+    get_database,
     get_db,
+    get_db_engine,
     get_engine,
     get_session_factory,
     init_db,
@@ -46,8 +48,10 @@ __all__ = [
     "Settings",
     "get_settings",
     "get_engine",
+    "get_db_engine",
     "get_session_factory",
     "get_db",
+    "get_database",
     "init_db",
     "check_database_health",
     "CareerOpsError",

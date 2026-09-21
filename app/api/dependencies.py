@@ -1,5 +1,3 @@
-from collections.abc import AsyncGenerator
-
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,25 +6,11 @@ from app.core import (
     InvalidTokenError,
     TokenExpiredError,
     decode_access_token,
-    get_db as core_get_db,
+    get_db,
 )
 from app.services.auth import UserContext, get_user_by_id
 
 security_bearer = HTTPBearer(auto_error=False)
-
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency that provides a managed async SQLAlchemy database Session.
-
-    The only way any route touches the database — every service function
-    under app/services/ takes an AsyncSession, queried through app/models/'s
-    ORM classes. No route or service should construct its own engine/session.
-
-    Yields:
-        AsyncSession: Open database session for executing ORM queries.
-    """
-    async for session in core_get_db():
-        yield session
 
 
 async def get_current_user(

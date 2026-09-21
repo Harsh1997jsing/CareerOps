@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_current_user, get_db, require_admin
+from app.api.dependencies import get_current_user, require_admin
 from app.api.schemas import (
     LoginRequest,
     TenantCreateRequest,
@@ -19,7 +19,7 @@ from app.api.schemas import (
     UserCreateRequest,
     UserOut,
 )
-from app.core import rate_limit
+from app.core import get_db, rate_limit
 from app.services.auth import (
     InvalidCredentialsError,
     ProtectedAdminError,

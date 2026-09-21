@@ -15,8 +15,9 @@ see backend.md and memory/known-gaps.md.
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_current_user, get_db
+from app.api.dependencies import get_current_user
 from app.api.schemas import GeneratedDocumentOut, JobDetailOut, JobListItemOut, JobStatusActionOut
+from app.core import get_db
 from app.services import jobs as jobs_service
 
 router = APIRouter(tags=["jobs"], dependencies=[Depends(get_current_user)])

@@ -4,9 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.api.dependencies import get_current_user, get_db
+from app.api.dependencies import get_current_user
 from app.api.main import app
-from app.core import rate_limit
+from app.core import get_db, rate_limit
 from app.services.auth import (
     DEFAULT_ADMIN_EMAIL,
     DEFAULT_ADMIN_PASSWORD,

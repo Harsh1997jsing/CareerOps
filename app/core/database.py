@@ -114,6 +114,11 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+# Convenience aliases for standard dependency naming conventions
+get_database = get_db
+get_db_engine = get_engine
+
+
 async def check_database_health(engine: AsyncEngine | None = None) -> bool:
     """Verify database connectivity by executing a lightweight ping query.
 

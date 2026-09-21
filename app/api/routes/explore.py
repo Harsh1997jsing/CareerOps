@@ -15,7 +15,7 @@ the router level, audit finding F1).
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_current_user, get_db
+from app.api.dependencies import get_current_user
 from app.api.schemas import (
     CapabilityMatrixOut,
     ExploreResultOut,
@@ -23,6 +23,7 @@ from app.api.schemas import (
     ExploreSaveResponseOut,
     ExploreSearchRequest,
 )
+from app.core import get_db
 from app.sources.common import description_hash, insert_jobs
 from app.sources.mcp import explore as mcp_explore
 

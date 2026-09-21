@@ -3,8 +3,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_current_user, get_db
+from app.api.dependencies import get_current_user
 from app.api.main import app
+from app.core import get_db
 from tests.conftest import FAKE_USER_CONTEXT
 
 client = TestClient(app)
