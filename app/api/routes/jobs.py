@@ -16,8 +16,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
-from app.api.schemas import GeneratedDocumentOut, JobDetailOut, JobListItemOut, JobStatusActionOut
+from app.api.schemas import (
+    GenerateDocumentRequest,
+    GeneratedDocumentOut,
+    JobDetailOut,
+    JobListItemOut,
+    JobStatusActionOut,
+)
 from app.core import get_db
+from app.core.config import get_settings
+from app.services import document_generator
+from app.services import job_scorer
 from app.services import jobs as jobs_service
 
 router = APIRouter(tags=["jobs"], dependencies=[Depends(get_current_user)])
@@ -65,9 +74,11 @@ async def reject_job(job_id: int, session: AsyncSession = Depends(get_db)):
     """Hide a job from the default Dashboard view by setting its status to REJECTED.
 
     Sets `Job.status` directly rather than going through
-    /applications/{id}/reject — no Application row exists for any job
-    today (nothing in this codebase creates one yet), so that route is
-    unreachable here. Reversible via POST /jobs/{job_id}/restore.
+    /applications/{id}/reject — this predates a job having an Application
+    row at all (one now exists once /jobs/{job_id}/documents has been
+    called at least once) and stays a distinct mechanism: hiding a job
+    from the Dashboard is not an application-workflow decision. Reversible
+    via POST /jobs/{job_id}/restore.
 
     Args:
         job_id: Identifier of the job to reject.
@@ -131,3 +142,63 @@ async def list_documents(job_id: int, session: AsyncSession = Depends(get_db)):
     """
     docs = await jobs_service.list_generated_documents(session, job_id)
     return [GeneratedDocumentOut.model_validate(doc, from_attributes=True) for doc in docs]
+
+
+@router.post("/jobs/{job_id}/analyze", response_model=JobDetailOut)
+async def analyze_job(job_id: int, session: AsyncSession = Depends(get_db)):
+    """Score a job's fit against candidate skills/evidence/constraints and record it.
+
+    Runs job_scorer.score_job() against the job's description, persists
+    the result as a new JobAnalysis row (job_scorer.decide()'s REJECT/
+    READY_FOR_REVIEW/REVIEW_REQUIRED outcome also becomes the job's new
+    Job.status), and returns the job's refreshed detail view. Re-running
+    this on an already-analyzed job adds a new analysis row rather than
+    replacing the old one — see jobs_service.record_analysis().
+
+    Args:
+        job_id: Identifier of the job to score.
+        session: Database session dependency.
+
+    Returns:
+        JobDetailOut: The job's detail view with its new fit score/status.
+
+    Raises:
+        HTTPException: 404 if no job with `job_id` exists.
+    """
+    job = await _get_job_or_404(session, job_id)
+    settings = get_settings()
+    analysis = job_scorer.score_job(
+        job.description, settings.skills_path, settings.evidence_path, settings.constraints_path
+    )
+    await jobs_service.record_analysis(session, job, analysis)
+    await jobs_service.set_job_status(session, job, job_scorer.decide(analysis))
+
+    updated = await jobs_service.get_job(session, job_id)
+    return JobDetailOut.model_validate(updated, from_attributes=True)
+
+
+@router.post("/jobs/{job_id}/documents", response_model=GeneratedDocumentOut)
+async def generate_document(job_id: int, payload: GenerateDocumentRequest, session: AsyncSession = Depends(get_db)):
+    """Generate a tailored resume or cover letter for a job.
+
+    Writes the document to a .docx, runs it through claim/ATS validation
+    (see app/services/document_generator.py), and get-or-creates the
+    job's Application row — this, not a separate action, is what starts a
+    job's real application workflow (approve/open/mark-applied, all keyed
+    by application_id — see app/api/routes/applications.py).
+
+    Args:
+        job_id: Identifier of the job to generate a document for.
+        payload: Which document type to generate.
+        session: Database session dependency.
+
+    Returns:
+        GeneratedDocumentOut: The new document's metadata, including
+            whether it passed claim verification and ATS checks.
+
+    Raises:
+        HTTPException: 404 if no job with `job_id` exists.
+    """
+    job = await _get_job_or_404(session, job_id)
+    document = await document_generator.generate_document(session, job, payload.type)
+    return GeneratedDocumentOut.model_validate(document, from_attributes=True)

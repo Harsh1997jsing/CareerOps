@@ -15,6 +15,7 @@ a pre-formatted string.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,15 @@ class GeneratedDocumentOut(BaseModel):
     version: int
     claim_check_passed: bool | None
     ats_check_passed: bool | None
+
+
+class GenerateDocumentRequest(BaseModel):
+    """Request to generate a tailored resume or cover letter for a job.
+
+    Attributes:
+        type: Which document to generate.
+    """
+    type: Literal["resume", "cover_letter"]
 
 
 class ApplicationActionOut(BaseModel):

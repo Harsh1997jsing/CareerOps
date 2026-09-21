@@ -13,19 +13,22 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import GeneratedDocument, Job
+from app.llm.schemas import JobFitAnalysis
+from app.models import GeneratedDocument, Job, JobAnalysis
 from app.schemas import GeneratedDocumentItem, JobDetail, JobListItem
 from app.services.applications import _application_to_item
 
-# Job.status values a job can be set to directly from the Dashboard. There
-# is currently no scoring pipeline that ever writes Job.status (confirmed:
-# nothing outside this module's own default reads/writes it) and no code
-# path ever creates an Application row for a job — so the existing
-# /applications/{id}/reject route is unreachable for every job in the
-# database today, not just unwired in the UI. REJECTED/DISCOVERED here are
-# a separate, honest mechanism: hide/unhide a job on the Dashboard by
-# mutating the job's own status directly, without pretending an
-# application-review workflow exists yet.
+# Job.status values a job can be set to directly from the Dashboard, kept
+# entirely separate from Application.status (APPROVED/REJECTED/APPLIED/
+# READY_FOR_REVIEW — see app/services/applications.py). Originally this
+# was the *only* status mechanism at all — no scoring pipeline wrote
+# Job.status and no code path ever created an Application row (see
+# app/services/document_generator.py, which now does both: job_scorer's
+# decide() writes Job.status via record_analysis()+set_job_status(), and
+# generating a job's first document get-or-creates its Application via
+# applications_service.create_application()). REJECTED/DISCOVERED here
+# remain a distinct, honest mechanism for hiding/unhiding a job on the
+# Dashboard before it's ever gone through scoring or document generation.
 REJECTED_JOB_STATUS = "REJECTED"
 DEFAULT_JOB_STATUS = "DISCOVERED"
 
@@ -35,6 +38,7 @@ __all__ = [
     "list_generated_documents",
     "get_job_by_id",
     "set_job_status",
+    "record_analysis",
     "REJECTED_JOB_STATUS",
     "DEFAULT_JOB_STATUS",
 ]
@@ -128,6 +132,39 @@ async def set_job_status(session: AsyncSession, job: Job, status: str) -> None:
     await session.commit()
 
 
+async def record_analysis(session: AsyncSession, job: Job, analysis: JobFitAnalysis) -> JobAnalysis:
+    """Persist a job_scorer.score_job() result as a new JobAnalysis row.
+
+    Additive, not a replace — list_jobs()/get_job() already read only the
+    newest row via `job.analyses[0]` (ordered newest-first, see
+    app/models/job.py), so re-analyzing a job keeps its scoring history
+    rather than destroying it.
+
+    Args:
+        session: Database session.
+        job: Already-loaded Job ORM row.
+        analysis: Structured fit analysis from job_scorer.score_job().
+
+    Returns:
+        JobAnalysis: The newly created analysis row.
+    """
+    row = JobAnalysis(
+        job_id=job.id,
+        fit_score=analysis.fit_score,
+        confidence=analysis.confidence,
+        eligible=analysis.eligible,
+        strong_matches=analysis.strong_matches,
+        # JobFitAnalysis calls this "missing_requirements"; JobAnalysis's
+        # own column (and JobListItem/JobDetail's field) is "missing_skills"
+        # — same data, different name at the LLM-output layer vs. the DB/API layer.
+        missing_skills=analysis.missing_requirements,
+        risks=analysis.risks,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
 async def get_job(session: AsyncSession, job_id: int) -> JobDetail | None:
     """Single-job detail for GET /jobs/{id} — includes `description`, which
     list_jobs() intentionally omits to keep the list query light.
@@ -136,9 +173,22 @@ async def get_job(session: AsyncSession, job_id: int) -> JobDetail | None:
     rather than issuing a second round-trip for the application record —
     the old dashboard_data.get_job() called get_application_for_job()
     separately after fetching the job.
+
+    Uses `select()`, not `session.get()`, deliberately: `session.get()`
+    returns an already-identity-mapped object straight from the session
+    without emitting SQL at all when it's already present and not
+    expired — silently skipping the `options=` eager loads on this call
+    and leaving `analyses`/`applications` unloaded (confirmed live: a
+    caller that loads a bare Job first, e.g. /jobs/{id}/analyze's
+    get_job_by_id() before mutating it, then hit a MissingGreenlet crash
+    right here on the implicit lazy-load `select()` triggers instead).
+    `select()` always executes and applies eager-load options, refreshing
+    the cached object's relationships even when it was already tracked.
     """
-    job = await session.get(
-        Job, job_id, options=[selectinload(Job.analyses), selectinload(Job.applications)]
+    job = await session.scalar(
+        select(Job)
+        .options(selectinload(Job.analyses), selectinload(Job.applications))
+        .where(Job.id == job_id)
     )
     if job is None:
         return None

@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 from app.api.dependencies import get_current_user
 from app.api.main import app
 from app.core import get_db
+from app.llm.schemas import JobFitAnalysis
+from app.models import GeneratedDocument
 from app.schemas import ApplicationItem, GeneratedDocumentItem, JobDetail, JobListItem
 from tests.conftest import FAKE_USER_CONTEXT
 
@@ -177,3 +179,84 @@ def test_list_documents_returns_mapped_items():
     body = response.json()
     assert body[0]["claim_check_passed"] is True
     assert body[0]["ats_check_passed"] is False
+
+
+def test_analyze_job_requires_authentication():
+    app.dependency_overrides.pop(get_current_user, None)
+    try:
+        response = client.post("/jobs/1/analyze")
+    finally:
+        app.dependency_overrides[get_current_user] = lambda: FAKE_USER_CONTEXT
+
+    assert response.status_code == 401
+
+
+def test_analyze_job_returns_404_when_missing():
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=None)):
+        response = client.post("/jobs/999/analyze")
+
+    assert response.status_code == 404
+
+
+def test_analyze_job_scores_records_and_returns_updated_detail():
+    job = MagicMock(description="Build things with Python.")
+    analysis = JobFitAnalysis(
+        eligible=True, fit_score=90, confidence="high",
+        strong_matches=["Python"], missing_requirements=[], risks=[], summary="Great fit.",
+    )
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.job_scorer.score_job", return_value=analysis) as mock_score, \
+         patch("app.api.routes.jobs.job_scorer.decide", return_value="READY_FOR_REVIEW") as mock_decide, \
+         patch("app.api.routes.jobs.jobs_service.record_analysis", AsyncMock()) as mock_record, \
+         patch("app.api.routes.jobs.jobs_service.set_job_status", AsyncMock()) as mock_set, \
+         patch("app.api.routes.jobs.jobs_service.get_job", AsyncMock(return_value=JOB_DETAIL)):
+        response = client.post("/jobs/1/analyze")
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == 1
+    mock_score.assert_called_once()
+    mock_record.assert_called_once_with(mock_record.call_args[0][0], job, analysis)
+    mock_decide.assert_called_once_with(analysis)
+    mock_set.assert_called_once_with(mock_set.call_args[0][0], job, "READY_FOR_REVIEW")
+
+
+def test_generate_document_requires_authentication():
+    app.dependency_overrides.pop(get_current_user, None)
+    try:
+        response = client.post("/jobs/1/documents", json={"type": "resume"})
+    finally:
+        app.dependency_overrides[get_current_user] = lambda: FAKE_USER_CONTEXT
+
+    assert response.status_code == 401
+
+
+def test_generate_document_returns_404_when_job_missing():
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=None)):
+        response = client.post("/jobs/999/documents", json={"type": "resume"})
+
+    assert response.status_code == 404
+
+
+def test_generate_document_rejects_invalid_type():
+    job = MagicMock()
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)):
+        response = client.post("/jobs/1/documents", json={"type": "portfolio"})
+
+    assert response.status_code == 422
+
+
+def test_generate_document_returns_generated_document():
+    job = MagicMock()
+    document = GeneratedDocument(
+        id=9, job_id=1, type="resume", file_path="data/generated_documents/job_1_resume_v1.docx",
+        version=1, claim_check_passed=True, ats_check_passed=True,
+    )
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.document_generator.generate_document", AsyncMock(return_value=document)) as mock_gen:
+        response = client.post("/jobs/1/documents", json={"type": "resume"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 9
+    assert body["claim_check_passed"] is True
+    mock_gen.assert_called_once_with(mock_gen.call_args[0][0], job, "resume")

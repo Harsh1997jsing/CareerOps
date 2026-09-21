@@ -1,7 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
+from app.llm.schemas import JobFitAnalysis
 from app.models import GeneratedDocument, JobAnalysis
-from app.services.jobs import DEFAULT_JOB_STATUS, REJECTED_JOB_STATUS, get_job, list_generated_documents, list_jobs, set_job_status
+from app.services.jobs import (
+    DEFAULT_JOB_STATUS,
+    REJECTED_JOB_STATUS,
+    get_job,
+    get_job_by_id,
+    list_generated_documents,
+    list_jobs,
+    record_analysis,
+    set_job_status,
+)
 from tests.conftest import make_job
 
 
@@ -168,3 +178,39 @@ async def test_get_job_defaults_null_analysis_fields_to_empty_list(db_session):
     assert job.missing_skills == []
     assert job.risks == []
     assert job.application is None
+
+
+async def test_record_analysis_persists_a_new_row(db_session):
+    job = await make_job(db_session)
+    analysis = JobFitAnalysis(
+        eligible=True, fit_score=88, confidence="high",
+        strong_matches=["Python"], missing_requirements=["Kubernetes"], risks=[], summary="Strong match.",
+    )
+
+    row = await record_analysis(db_session, job, analysis)
+
+    assert row.job_id == job.id
+    assert row.fit_score == 88
+    assert row.confidence == "high"
+    assert row.strong_matches == ["Python"]
+    # JobFitAnalysis's own field is "missing_requirements" — the ORM
+    # column (and the API-facing shape) calls the same data "missing_skills".
+    assert row.missing_skills == ["Kubernetes"]
+
+
+async def test_record_analysis_is_additive_not_a_replace(db_session):
+    job = await make_job(db_session)
+    old = JobFitAnalysis(
+        eligible=True, fit_score=50, confidence="low",
+        strong_matches=[], missing_requirements=[], risks=[], summary="Old.",
+    )
+    new = JobFitAnalysis(
+        eligible=True, fit_score=90, confidence="high",
+        strong_matches=["Python"], missing_requirements=[], risks=[], summary="New.",
+    )
+    await record_analysis(db_session, job, old)
+    await record_analysis(db_session, job, new)
+
+    refreshed = await get_job_by_id(db_session, job.id)
+    await db_session.refresh(refreshed, attribute_names=["analyses"])
+    assert {a.fit_score for a in refreshed.analyses} == {50, 90}

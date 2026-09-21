@@ -53,6 +53,20 @@ class Settings(BaseSettings):
     hasdata_mcp_url: str = ""
     hasdata_mcp_api_key: str = ""
 
+    # Candidate data files — the single source of truth for these paths,
+    # so job_scorer/resume_generator/cover_letter/ats_validator callers
+    # (app/services/document_generator.py, app/api/routes/jobs.py) don't
+    # each hardcode "data/...yaml" separately.
+    skills_path: str = "data/skills.yaml"
+    evidence_path: str = "data/evidence.yaml"
+    constraints_path: str = "data/constraints.yaml"
+    profile_path: str = "data/profile.yaml"
+    voice_samples_dir: str = "data/voice_samples"
+    # Where generated .docx files are written — local-first (CLAUDE.md
+    # rule 1), so this is a path on the same machine the browser runs on,
+    # not something served back over HTTP.
+    documents_dir: str = "data/generated_documents"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -24,6 +24,7 @@ __all__ = [
     "REJECTED_STATUS",
     "get_application",
     "get_application_for_job",
+    "create_application",
     "get_application_context",
     "get_company_applied_dates",
     "check_cooldown_for_company",
@@ -65,6 +66,38 @@ async def get_application_for_job(session: AsyncSession, job_id: int) -> Applica
     if application is None:
         return None
     return _application_to_item(application)
+
+
+async def create_application(session: AsyncSession, job_id: int) -> Application:
+    """Get-or-create the Application row for a job.
+
+    Until app/services/document_generator.py started calling this, no
+    code path ever created an Application row at all (see
+    app/services/jobs.py's REJECTED_JOB_STATUS docstring) — Dashboard
+    reject/restore mutated Job.status directly instead, as a documented
+    stand-in for the real workflow. Generating a job's first document is
+    what starts that real workflow now, rather than a separate explicit
+    "start application" action — nothing else needs to happen first.
+    Idempotent: a job has at most one Application (get_application_for_job()
+    already assumes this via `.first()`), so a second document for the
+    same job reuses the existing row instead of creating a duplicate.
+
+    Args:
+        session: Database session.
+        job_id: Job to create or find the application for.
+
+    Returns:
+        Application: The existing or newly created row, in its default
+            READY_FOR_REVIEW status if newly created.
+    """
+    existing = (await session.scalars(select(Application).where(Application.job_id == job_id))).first()
+    if existing is not None:
+        return existing
+    application = Application(job_id=job_id)
+    session.add(application)
+    await session.commit()
+    await session.refresh(application)
+    return application
 
 
 async def get_application_context(session: AsyncSession, application_id: int) -> ApplicationContext | None:
