@@ -64,7 +64,32 @@ def fetch_all_targets(path: str = COMPANIES_PATH) -> list[dict]:
     return jobs
 
 
-async def search_all(path: str = COMPANIES_PATH) -> list[dict]:
+def _matches_experience(job: dict, experience: str) -> bool:
+    """Check a normalized target job's title/description against an experience query.
+
+    Greenhouse's and Lever's public job-board APIs have no standardized
+    experience/seniority facet (unlike jobspy's job_level/experience_range
+    output fields), so there's no structured field to match here at all —
+    this is a plain keyword heuristic against the text every posting does
+    have, matching e.g. "senior" against a title like "Senior Backend
+    Engineer".
+
+    Args:
+        job: Normalized job dict (from greenhouse.fetch_jobs/lever.fetch_jobs).
+        experience: Free-text experience query (e.g. "senior", "entry level").
+
+    Returns:
+        bool: True if `experience` appears as a case-insensitive substring
+            of the job's title or description.
+    """
+    needle = experience.strip().lower()
+    if not needle:
+        return True
+    haystack = f"{job.get('title', '')} {job.get('description', '')}".lower()
+    return needle in haystack
+
+
+async def search_all(path: str = COMPANIES_PATH, experience: str | None = None) -> list[dict]:
     """Fetch postings from every configured company target without saving them.
 
     Backs `POST /targets/search` — the Dashboard shows these to the user
@@ -74,11 +99,17 @@ async def search_all(path: str = COMPANIES_PATH) -> list[dict]:
 
     Args:
         path: Filepath to company targets configuration.
+        experience: Optional free-text experience-level filter, applied
+            app-side via _matches_experience since neither board API
+            exposes a structured experience facet to filter on upstream.
 
     Returns:
         list[dict]: Normalized jobs, not yet persisted.
     """
-    return await asyncio.to_thread(fetch_all_targets, path)
+    jobs = await asyncio.to_thread(fetch_all_targets, path)
+    if experience:
+        jobs = [job for job in jobs if _matches_experience(job, experience)]
+    return jobs
 
 
 async def ingest_all(session: AsyncSession, path: str = COMPANIES_PATH) -> int:

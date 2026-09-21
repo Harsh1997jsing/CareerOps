@@ -73,3 +73,11 @@ def test_search_targets_returns_results_without_inserting():
     assert len(body) == 1
     assert body[0]["company"] == "Acme"
     mock_search.assert_called_once()
+
+
+def test_search_targets_forwards_experience_query_param():
+    with patch("app.api.routes.targets.targets.search_all", AsyncMock(return_value=[JOB])) as mock_search:
+        response = client.post("/targets/search?experience=senior")
+
+    assert response.status_code == 200
+    mock_search.assert_called_once_with(experience="senior")

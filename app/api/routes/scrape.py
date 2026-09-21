@@ -45,5 +45,6 @@ async def scrape_jobspy(payload: ScrapeJobspyRequest):
         payload.location,
         payload.sites,
         payload.results_wanted,
+        payload.experience,
     )
     return [ExploreResultOut(**job) for job in jobs]

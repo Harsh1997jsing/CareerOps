@@ -1,6 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
-from app.sources.targets import fetch_all_targets, ingest_all, load_company_targets, search_all
+from app.sources.targets import _matches_experience, fetch_all_targets, ingest_all, load_company_targets, search_all
 
 COMPANIES_YAML = """
 greenhouse:
@@ -67,3 +67,30 @@ async def test_search_all_returns_fetched_jobs_without_inserting():
     assert jobs == [GH_JOB, LEVER_JOB]
     mock_fetch.assert_called_once()
     mock_insert.assert_not_called()
+
+
+def test_matches_experience_checks_title_and_description():
+    assert _matches_experience({"title": "Senior Backend Engineer"}, "senior")
+    assert _matches_experience({"title": "Engineer", "description": "5+ years senior IC"}, "senior")
+    assert not _matches_experience({"title": "Junior Backend Engineer"}, "senior")
+
+
+def test_matches_experience_blank_query_matches_everything():
+    assert _matches_experience({}, "")
+    assert _matches_experience({}, "   ")
+
+
+async def test_search_all_filters_by_experience():
+    senior_job = {"source": "greenhouse", "company": "Acme", "title": "Senior Backend Engineer"}
+    junior_job = {"source": "lever", "company": "Beta Co", "title": "Junior Backend Engineer"}
+    with patch("app.sources.targets.fetch_all_targets", return_value=[senior_job, junior_job]):
+        jobs = await search_all(experience="senior")
+
+    assert jobs == [senior_job]
+
+
+async def test_search_all_without_experience_returns_everything():
+    with patch("app.sources.targets.fetch_all_targets", return_value=[GH_JOB, LEVER_JOB]):
+        jobs = await search_all(experience=None)
+
+    assert jobs == [GH_JOB, LEVER_JOB]

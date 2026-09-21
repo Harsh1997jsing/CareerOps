@@ -309,11 +309,17 @@ class ScrapeJobspyRequest(BaseModel):
             silently dropped server-side, not rejected.
         results_wanted: Target number of postings (capped server-side at
             MAX_JOBS_PER_RUN = 50).
+        experience: Optional free-text experience-level filter (e.g.
+            "senior", "3-5 yrs"), applied app-side after scraping — jobspy
+            has no matching input parameter, so this only narrows results
+            from sites that report an experience field in the first place
+            (see app/sources/jobspy_source.py's _matches_experience).
     """
     search_term: str
     location: str | None = None
     sites: list[str] | None = None
     results_wanted: int = 50
+    experience: str | None = None
 
 
 class TenantOut(BaseModel):

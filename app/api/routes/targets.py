@@ -41,12 +41,17 @@ async def list_targets():
 
 
 @router.post("/targets/search", response_model=list[ExploreResultOut])
-async def search_targets():
+async def search_targets(experience: str | None = None):
     """Fetch postings from every configured company target, without saving them.
+
+    Args:
+        experience: Optional free-text experience-level filter (e.g.
+            "senior") — matched against each posting's title/description,
+            since Greenhouse/Lever expose no structured experience facet.
 
     Returns:
         list[ExploreResultOut]: Normalized postings — save the ones you
             want via POST /explore/save.
     """
-    jobs = await targets.search_all()
+    jobs = await targets.search_all(experience=experience)
     return [ExploreResultOut(**job) for job in jobs]

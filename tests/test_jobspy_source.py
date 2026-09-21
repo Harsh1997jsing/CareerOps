@@ -3,7 +3,7 @@ from datetime import date, datetime
 import pandas as pd
 from unittest.mock import patch
 
-from app.sources.jobspy_source import fetch_jobs, normalize_job
+from app.sources.jobspy_source import _matches_experience, fetch_jobs, normalize_job
 
 RAW_ROW = {
     "id": "in-123",
@@ -147,3 +147,40 @@ def test_fetch_jobs_caps_at_max_per_run():
         jobs = fetch_jobs("backend engineer", results_wanted=1000)
 
     assert len(jobs) == 50
+
+
+def test_matches_experience_checks_job_level_and_experience_range():
+    assert _matches_experience({"job_level": "Entry level"}, "entry")
+    assert _matches_experience({"experience_range": "3-5 Yrs"}, "3-5")
+    assert not _matches_experience({"job_level": "Entry level"}, "senior")
+
+
+def test_matches_experience_blank_query_matches_everything():
+    assert _matches_experience({}, "")
+    assert _matches_experience({}, "   ")
+
+
+def test_matches_experience_handles_missing_and_nan_fields():
+    assert not _matches_experience({"job_level": float("nan")}, "senior")
+    assert not _matches_experience({}, "senior")
+
+
+def test_fetch_jobs_filters_by_experience():
+    rows = [
+        {**RAW_ROW, "id": "in-1", "experience_range": "0-1 Yrs"},
+        {**RAW_ROW, "id": "in-2", "experience_range": "5-8 Yrs"},
+    ]
+    df = pd.DataFrame(rows)
+    with patch("app.sources.jobspy_source.scrape_jobs", return_value=df):
+        jobs = fetch_jobs("backend engineer", experience="5-8")
+
+    assert len(jobs) == 1
+    assert jobs[0]["source_job_id"] == "in-2"
+
+
+def test_fetch_jobs_experience_filter_drops_rows_with_no_experience_field():
+    df = pd.DataFrame([RAW_ROW])
+    with patch("app.sources.jobspy_source.scrape_jobs", return_value=df):
+        jobs = fetch_jobs("backend engineer", experience="senior")
+
+    assert jobs == []

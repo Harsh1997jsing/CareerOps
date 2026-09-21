@@ -56,3 +56,13 @@ def test_scrape_jobspy_returns_empty_list_when_nothing_matches():
         response = client.post("/scrape/jobspy", json={"search_term": "nonexistent role xyz"})
 
     assert response.json() == []
+
+
+def test_scrape_jobspy_forwards_experience_filter():
+    with patch("app.api.routes.scrape.jobspy_source.fetch_jobs", return_value=[JOB]) as mock_fetch:
+        response = client.post(
+            "/scrape/jobspy", json={"search_term": "backend engineer", "experience": "senior"}
+        )
+
+    assert response.status_code == 200
+    mock_fetch.assert_called_once_with("backend engineer", None, None, 50, "senior")
