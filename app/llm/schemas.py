@@ -29,19 +29,6 @@ class JobFitAnalysis(BaseModel):
     summary: str
 
 
-class ScreeningAnswer(BaseModel):
-    """Answer generated for an employer screening question grounded in candidate evidence.
-
-    Attributes:
-        answer: Drafted response to the screening question.
-        evidence_ids: List of evidence IDs from data/evidence.yaml supporting the answer.
-        confidence: Confidence level of the answer ("high", "medium", or "low").
-    """
-    answer: str
-    evidence_ids: list[str]
-    confidence: Literal["high", "medium", "low"]
-
-
 class ClaimCheckItem(BaseModel):
     """Verification outcome for an individual factual claim in generated text.
 

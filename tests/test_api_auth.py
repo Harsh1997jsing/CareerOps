@@ -172,6 +172,33 @@ async def test_create_user_rejects_short_password(auth_client):
     assert response.status_code == 422
 
 
+async def test_create_user_rejects_empty_email(auth_client):
+    """Full code audit finding: an empty email string previously created a
+    permanent, unusable user row (no format validation on this field at all)."""
+    client, _ = auth_client
+    admin_token = _login_as(client, DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD)
+
+    response = client.post(
+        "/auth/users",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"email": "", "password": "password123", "role": "user"},
+    )
+    assert response.status_code == 422
+
+
+async def test_create_user_accepts_a_dot_local_email():
+    # The lightweight email format check must not reject this project's
+    # own convention (DEFAULT_ADMIN_EMAIL = admin@careerops.local,
+    # app/core/config.py) — a strict RFC/deliverability validator (e.g.
+    # pydantic.EmailStr's email-validator backend) rejects .local as a
+    # reserved-use TLD, which would be the wrong strictness for a
+    # local-first tool.
+    from app.api.schemas import UserCreateRequest
+
+    request = UserCreateRequest(email="newdev@careerops.local", password="password123")
+    assert request.email == "newdev@careerops.local"
+
+
 async def test_create_tenant_rejects_malformed_slug(auth_client):
     """Audit finding F7: slug had no format validation — spaces/uppercase/
     punctuation were accepted and merely lowercased, never rejected."""
@@ -182,6 +209,19 @@ async def test_create_tenant_rejects_malformed_slug(auth_client):
         "/auth/tenants",
         headers={"Authorization": f"Bearer {admin_token}"},
         json={"name": "Bad Corp", "slug": "Not A Valid Slug!"},
+    )
+    assert response.status_code == 422
+
+
+async def test_create_tenant_rejects_empty_name(auth_client):
+    """Full code audit finding: an empty name string had no validation at all."""
+    client, _ = auth_client
+    admin_token = _login_as(client, DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD)
+
+    response = client.post(
+        "/auth/tenants",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"name": "", "slug": "empty-name-corp"},
     )
     assert response.status_code == 422
 

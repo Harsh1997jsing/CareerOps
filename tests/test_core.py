@@ -10,12 +10,9 @@ from app.core import (
     ApplicationNotConfirmedError,
     AuthError,
     CareerOpsError,
-    ConfigurationError,
     ConflictError,
-    ForbiddenError,
     InvalidCredentialsError,
     InvalidTokenError,
-    NotFoundError,
     ProtectedAdminError,
     Settings,
     TokenExpiredError,
@@ -24,7 +21,6 @@ from app.core import (
     create_access_token,
     decode_access_token,
     get_db,
-    get_engine,
     get_settings,
     hash_password,
     init_db,
@@ -79,12 +75,10 @@ def test_core_exceptions_hierarchy():
     """Verify DRY exception hierarchy and inheritance."""
     # Base inheritance
     assert issubclass(AuthError, CareerOpsError)
-    assert issubclass(NotFoundError, CareerOpsError)
     assert issubclass(ConflictError, CareerOpsError)
 
     # Specific errors
     assert issubclass(ProtectedAdminError, AuthError)
-    assert issubclass(ForbiddenError, AuthError)
     assert issubclass(InvalidCredentialsError, AuthError)
     assert issubclass(UserAlreadyExistsError, ConflictError)
 

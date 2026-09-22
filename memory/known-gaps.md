@@ -3,6 +3,11 @@
 Everything below is real, not hypothetical — read this before assuming the
 pipeline works end-to-end just because all phases are "built."
 
+A separate full code audit (dead code, correctness bugs, races, and two
+items flagged as needing a follow-up decision rather than fixed) lives in
+`memory/code-audit.md` — this file stays scoped to known, deliberate
+design/scope boundaries; that one is the systematic bug-hunt.
+
 ## Auth gates access, not tenant data (backend audit finding F2)
 
 `/jobs`, `/applications/*`, `/explore/*` now require a valid bearer token
@@ -20,25 +25,35 @@ a larger, separate decision than this fix pass covers. If multi-tenant
 job data is ever actually wanted, start there, not with a bolt-on filter
 on the read routes.
 
-## Orchestration exists now, but only the review-and-generate half, and only on demand
+## Orchestration exists now, including auto-analyze on save
 
 `POST /jobs/{job_id}/analyze` (hard-filter → score → record) and
 `POST /jobs/{job_id}/documents` (generate → write .docx → claim/ATS
-validate → get-or-create `Application`) now call that chain for real —
-see `app/api/routes/jobs.py`, `app/services/jobs.py`'s `hard_filter_job()`/
-`record_analysis()`, and `app/services/document_generator.py`. Both are
-user-triggered per job from the frontend's Job Detail page, not automatic.
+validate → get-or-create `Application`) call that chain for real — see
+`app/services/jobs.py`'s `analyze_job()` (the shared hard_filter_job() →
+score_job() → record_analysis() pipeline both a route and a background
+task now call) and `app/services/document_generator.py`.
 
-What's still missing: **ingestion never triggers this automatically.**
+`POST /explore/save` — the one insert path shared by Explore, Target, Job
+Scraping, and AI Search (see `app/api/routes/explore.py`'s module
+docstring) — now queues `_auto_analyze()` as a FastAPI `BackgroundTasks`
+callback on every newly inserted (non-duplicate) job, so a saved job runs
+hard-filter/score automatically instead of sitting at `Job.status =
+"DISCOVERED"` until someone opens its Job Detail page and clicks Analyze.
+It opens its own DB session (the request's is already closed by the time
+a background task runs) and looks the job up by `description_hash`, since
+`insert_jobs()` only reports a count, not the row; any failure (bad LLM
+call, DB hiccup) is logged and swallowed — the job just stays at
+`DISCOVERED` for manual analysis later, same as before this existed.
+
+What's still missing: a **scheduled ingest sweep**. Auto-analyze only
+fires when a job is saved through `/explore/save` — nothing yet calls
 `app/sources/mcp/explore.py`'s `search()`, `app/sources/jobspy_source.py`'s
-`fetch_jobs()`, and `app/sources/targets.py`'s `search_all()` all still
-only stage results for manual review-then-save (`/explore/save`) — nothing
-runs hard-filter/score against a job the moment it's saved into `jobs`, so
-a saved job sits at `Job.status = "DISCOVERED"` until someone opens its
-Job Detail page and clicks Analyze. `apscheduler` (`requirements.txt`) is
-still unused — no recurring/scheduled ingestion or scoring run exists.
-Automating either of those (auto-analyze on save, or a scheduled ingest+
-analyze sweep) is the largest remaining piece of orchestration work.
+`fetch_jobs()`, or `app/sources/targets.py`'s `search_all()` on a timer to
+find and save new postings without a human running a search first.
+`apscheduler` (`requirements.txt`) is still unused — no recurring
+ingest-then-save-then-analyze run exists. That's the largest remaining
+piece of orchestration work.
 
 ## Placeholder data
 

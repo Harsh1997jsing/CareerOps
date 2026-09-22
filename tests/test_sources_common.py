@@ -6,6 +6,7 @@ from app.models import Job
 from app.sources.common import (
     description_hash,
     insert_jobs,
+    matches_experience,
     normalize_employment_type,
     normalize_location,
     strip_html,
@@ -28,6 +29,18 @@ def test_description_hash_is_stable_across_whitespace_and_case():
 
 def test_description_hash_differs_for_different_text():
     assert description_hash("Job A") != description_hash("Job B")
+
+
+def test_matches_experience_is_case_insensitive_substring_match():
+    assert matches_experience("Entry level", "entry")
+    assert matches_experience("3-5 Yrs", "3-5")
+    assert not matches_experience("Entry level", "senior")
+
+
+def test_matches_experience_blank_query_matches_everything():
+    assert matches_experience("", "")
+    assert matches_experience("", "   ")
+    assert matches_experience("anything", "")
 
 
 def test_normalize_location_maps_known_variants():

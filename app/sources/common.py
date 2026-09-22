@@ -138,6 +138,30 @@ def normalize_employment_type(raw_type: str | None) -> str | None:
     return EMPLOYMENT_TYPE_ALIASES.get(raw_type.strip().lower(), raw_type.strip())
 
 
+def matches_experience(haystack: str, experience: str) -> bool:
+    """Case-insensitive substring match against a free-text experience-level filter.
+
+    Shared by `jobspy_source.py` (haystack: a row's `job_level`/
+    `experience_range` fields) and `targets.py` (haystack: a job's title +
+    description, since Greenhouse/Lever expose no structured experience
+    facet at all) — same "no query parameter for this, so filter app-side"
+    shape, different haystack per source, previously implemented as two
+    independent near-identical functions.
+
+    Args:
+        haystack: Source-specific text to search.
+        experience: Free-text experience query (e.g. "senior", "3-5 years").
+
+    Returns:
+        bool: True if `experience` is blank, or appears in `haystack`
+            case-insensitively.
+    """
+    needle = experience.strip().lower()
+    if not needle:
+        return True
+    return needle in haystack.lower()
+
+
 async def insert_jobs(session: AsyncSession, jobs: list[dict]) -> int:
     """Insert normalized jobs into the database, skipping duplicates.
 

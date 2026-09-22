@@ -34,7 +34,6 @@ from app.core.config import get_settings
 from app.llm.schemas import GeneratedResumeSection
 from app.services import document_editor
 from app.services import document_generator
-from app.services import job_scorer
 from app.services import jobs as jobs_service
 
 router = APIRouter(tags=["jobs"], dependencies=[Depends(get_current_user)])
@@ -147,7 +146,13 @@ async def list_documents(job_id: int, session: AsyncSession = Depends(get_db)):
 
     Returns:
         list[GeneratedDocumentOut]: List of generated document records with validation flags.
+
+    Raises:
+        HTTPException: 404 if no job with `job_id` exists (a full code
+            audit pass caught this as the one `/jobs/{job_id}/...` route
+            that skipped this check, returning `200 []` for a nonexistent job).
     """
+    await _get_job_or_404(session, job_id)
     docs = await jobs_service.list_generated_documents(session, job_id)
     return [GeneratedDocumentOut.model_validate(doc, from_attributes=True) for doc in docs]
 
@@ -165,7 +170,9 @@ async def analyze_job(job_id: int, session: AsyncSession = Depends(get_db)):
     (job_scorer.decide()'s REJECT/READY_FOR_REVIEW/REVIEW_REQUIRED
     outcome also becomes the job's new Job.status). Re-running this on an
     already-analyzed job adds a new analysis row rather than replacing
-    the old one — see jobs_service.record_analysis().
+    the old one — see jobs_service.record_analysis(). Thin wrapper over
+    jobs_service.analyze_job(), the same pipeline /explore/save's
+    auto-analyze background task runs on a freshly saved job.
 
     Args:
         job_id: Identifier of the job to score.
@@ -180,19 +187,7 @@ async def analyze_job(job_id: int, session: AsyncSession = Depends(get_db)):
         HTTPException: 404 if no job with `job_id` exists.
     """
     job = await _get_job_or_404(session, job_id)
-    settings = get_settings()
-
-    hard_filter_result = jobs_service.hard_filter_job(job, settings.constraints_path)
-    if not hard_filter_result.passed:
-        await jobs_service.set_job_status(session, job, job_scorer.REJECT_STATUS)
-        updated = await jobs_service.get_job(session, job_id)
-        return JobDetailOut.model_validate(updated, from_attributes=True)
-
-    analysis = await asyncio.to_thread(
-        job_scorer.score_job, job.description, settings.skills_path, settings.evidence_path, settings.constraints_path
-    )
-    await jobs_service.record_analysis(session, job, analysis)
-    await jobs_service.set_job_status(session, job, job_scorer.decide(analysis))
+    await jobs_service.analyze_job(session, job, get_settings())
 
     updated = await jobs_service.get_job(session, job_id)
     return JobDetailOut.model_validate(updated, from_attributes=True)

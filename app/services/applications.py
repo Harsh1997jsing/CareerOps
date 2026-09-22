@@ -9,6 +9,7 @@ Queries through app/models/'s ORM classes on an async Session.
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -30,8 +31,6 @@ __all__ = [
     "check_cooldown_for_company",
     "set_status",
     "set_application_status",
-    "approve_application",
-    "reject_application",
 ]
 
 
@@ -82,6 +81,14 @@ async def create_application(session: AsyncSession, job_id: int) -> Application:
     already assumes this via `.first()`), so a second document for the
     same job reuses the existing row instead of creating a duplicate.
 
+    A `uq_applications_job_id` unique constraint (added by a later
+    migration than this docstring's original claim of no DB-level
+    backing) makes that idempotency real under concurrency too: two
+    requests racing past the `existing is None` check together will both
+    try to insert, but only one commit can win — the loser catches
+    `IntegrityError` here and re-queries for the row the winner just
+    created, rather than 500ing or creating a second row for one job.
+
     Args:
         session: Database session.
         job_id: Job to create or find the application for.
@@ -95,7 +102,14 @@ async def create_application(session: AsyncSession, job_id: int) -> Application:
         return existing
     application = Application(job_id=job_id)
     session.add(application)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing = (await session.scalars(select(Application).where(Application.job_id == job_id))).first()
+        if existing is not None:
+            return existing
+        raise
     await session.refresh(application)
     return application
 
@@ -151,11 +165,3 @@ async def set_application_status(session: AsyncSession, application_id: int, sta
     application = await session.get(Application, application_id)
     if application is not None:
         await set_status(session, application, status)
-
-
-async def approve_application(session: AsyncSession, application_id: int) -> None:
-    await set_application_status(session, application_id, APPROVED_STATUS)
-
-
-async def reject_application(session: AsyncSession, application_id: int) -> None:
-    await set_application_status(session, application_id, REJECTED_STATUS)

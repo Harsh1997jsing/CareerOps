@@ -177,13 +177,24 @@ def test_list_documents_returns_mapped_items():
         id=9, type="resume", file_path="generated/resume_v1.docx", version=1,
         claim_check_passed=True, ats_check_passed=False,
     )
-    with patch("app.api.routes.jobs.jobs_service.list_generated_documents", AsyncMock(return_value=[doc])):
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=MagicMock())), \
+         patch("app.api.routes.jobs.jobs_service.list_generated_documents", AsyncMock(return_value=[doc])):
         response = client.get("/jobs/1/documents")
 
     assert response.status_code == 200
     body = response.json()
     assert body[0]["claim_check_passed"] is True
     assert body[0]["ats_check_passed"] is False
+
+
+def test_list_documents_returns_404_when_job_missing():
+    # Full code audit finding: this was the one /jobs/{job_id}/... route
+    # that never checked the job exists, returning 200 [] instead of 404
+    # for a nonexistent job.
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=None)):
+        response = client.get("/jobs/999/documents")
+
+    assert response.status_code == 404
 
 
 def test_analyze_job_requires_authentication():
@@ -210,11 +221,11 @@ def test_analyze_job_scores_records_and_returns_updated_detail():
         strong_matches=["Python"], missing_requirements=[], risks=[], summary="Great fit.",
     )
     with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
-         patch("app.api.routes.jobs.jobs_service.hard_filter_job", return_value=FilterResult(passed=True)), \
-         patch("app.api.routes.jobs.job_scorer.score_job", return_value=analysis) as mock_score, \
-         patch("app.api.routes.jobs.job_scorer.decide", return_value="READY_FOR_REVIEW") as mock_decide, \
-         patch("app.api.routes.jobs.jobs_service.record_analysis", AsyncMock()) as mock_record, \
-         patch("app.api.routes.jobs.jobs_service.set_job_status", AsyncMock()) as mock_set, \
+         patch("app.services.jobs.hard_filter_job", AsyncMock(return_value=FilterResult(passed=True))), \
+         patch("app.services.jobs.job_scorer.score_job", return_value=analysis) as mock_score, \
+         patch("app.services.jobs.job_scorer.decide", return_value="READY_FOR_REVIEW") as mock_decide, \
+         patch("app.services.jobs.record_analysis", AsyncMock()) as mock_record, \
+         patch("app.services.jobs.set_job_status", AsyncMock()) as mock_set, \
          patch("app.api.routes.jobs.jobs_service.get_job", AsyncMock(return_value=JOB_DETAIL)):
         response = client.post("/jobs/1/analyze")
 
@@ -232,12 +243,12 @@ def test_analyze_job_short_circuits_on_failed_hard_filter():
     job = MagicMock(description="Unpaid internship, Mumbai.")
     with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
          patch(
-             "app.api.routes.jobs.jobs_service.hard_filter_job",
-             return_value=FilterResult(passed=False, reasons=["location 'Mumbai' not in allowed_locations"]),
+             "app.services.jobs.hard_filter_job",
+             AsyncMock(return_value=FilterResult(passed=False, reasons=["location 'Mumbai' not in allowed_locations"])),
          ), \
-         patch("app.api.routes.jobs.job_scorer.score_job") as mock_score, \
-         patch("app.api.routes.jobs.jobs_service.record_analysis", AsyncMock()) as mock_record, \
-         patch("app.api.routes.jobs.jobs_service.set_job_status", AsyncMock()) as mock_set, \
+         patch("app.services.jobs.job_scorer.score_job") as mock_score, \
+         patch("app.services.jobs.record_analysis", AsyncMock()) as mock_record, \
+         patch("app.services.jobs.set_job_status", AsyncMock()) as mock_set, \
          patch("app.api.routes.jobs.jobs_service.get_job", AsyncMock(return_value=JOB_DETAIL)):
         response = client.post("/jobs/1/analyze")
 
@@ -287,6 +298,17 @@ def test_generate_document_returns_generated_document():
     assert body["id"] == 9
     assert body["claim_check_passed"] is True
     mock_gen.assert_called_once_with(mock_gen.call_args[0][0], job, "resume")
+
+
+def test_suggest_document_edit_rejects_empty_feedback():
+    # Full code audit finding: an empty feedback string had no validation
+    # at all, spending a real Claude call for nothing.
+    job = MagicMock()
+    with patch("app.api.routes.jobs.jobs_service.get_job_by_id", AsyncMock(return_value=job)), \
+         patch("app.api.routes.jobs.jobs_service.get_generated_document", AsyncMock(return_value=MagicMock())):
+        response = client.post("/jobs/1/documents/9/suggest-edit", json={"feedback": ""})
+
+    assert response.status_code == 422
 
 
 def test_suggest_document_edit_returns_404_when_document_missing():

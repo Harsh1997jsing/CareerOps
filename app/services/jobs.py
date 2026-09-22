@@ -7,6 +7,7 @@ one module per resource, matching the route split.
 Queries through app/models/'s ORM classes on an async Session.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import yaml
@@ -14,9 +15,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import Settings, get_settings
 from app.llm.schemas import JobFitAnalysis
 from app.models import GeneratedDocument, Job, JobAnalysis
 from app.schemas import FilterResult, GeneratedDocumentItem, JobDetail, JobListItem
+from app.services import applications as applications_service
+from app.services import job_scorer
 from app.services.applications import _application_to_item
 from app.services.hard_filters import check_hard_filters
 
@@ -43,6 +47,7 @@ __all__ = [
     "set_job_status",
     "hard_filter_job",
     "record_analysis",
+    "analyze_job",
     "REJECTED_JOB_STATUS",
     "DEFAULT_JOB_STATUS",
 ]
@@ -93,7 +98,9 @@ async def list_jobs(
         q: Case-insensitive substring match against the job description —
             works identically on Postgres and the SQLite test DB
             (`.ilike()` compiles to `lower(x) LIKE lower(y)` where the
-            dialect has no native ILIKE).
+            dialect has no native ILIKE). `%`/`_` are escaped before
+            building the pattern so a literal `%`/`_` in the search term
+            is matched literally, not treated as a SQL LIKE wildcard.
         posted_within_days: Keeps only jobs posted/collected within this
             many days. Many sources never populate `posted_at` (only
             HasData/jobspy currently do, and only sometimes) — falls back
@@ -111,7 +118,8 @@ async def list_jobs(
     if status:
         stmt = stmt.where(Job.status == status)
     if q:
-        stmt = stmt.where(Job.description.ilike(f"%{q}%"))
+        escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(Job.description.ilike(f"%{escaped_q}%", escape="\\"))
     if posted_within_days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=posted_within_days)
         stmt = stmt.where(func.coalesce(Job.posted_at, Job.collected_at) >= cutoff.replace(tzinfo=None))
@@ -136,7 +144,7 @@ async def set_job_status(session: AsyncSession, job: Job, status: str) -> None:
     await session.commit()
 
 
-def hard_filter_job(job: Job, constraints_path: str) -> FilterResult:
+async def hard_filter_job(session: AsyncSession, job: Job, constraints_path: str) -> FilterResult:
     """Run the deterministic, non-LLM checks a job must pass before scoring.
 
     CLAUDE.md's pipeline order is explicit that "only jobs that pass these
@@ -147,11 +155,23 @@ def hard_filter_job(job: Job, constraints_path: str) -> FilterResult:
     hard_filters.check_hard_filters() never fires here; every other check
     does.
 
+    Also checks `constraints.yaml`'s `company_cooldown_days` against
+    `CompanyApplicationHistory` (via
+    applications_service.check_cooldown_for_company(), the same function a
+    frontend cooldown warning would reuse, so the two can never disagree)
+    — this was previously built and unit-tested but never actually called
+    from anywhere, so a job at a company just applied to wasn't being
+    excluded despite the feature existing. Async now (it wasn't before)
+    since this DB check requires a session, unlike the rest of this
+    function's constraints.yaml-only checks.
+
     Args:
+        session: Database session (for the company-cooldown check).
         job: Already-loaded Job ORM row.
         constraints_path: Path to constraints YAML (allowed_locations,
             employment_types, minimum_experience_years,
-            acceptable_experience_gap_years, exclude_keywords).
+            acceptable_experience_gap_years, exclude_keywords,
+            company_cooldown_days).
 
     Returns:
         FilterResult: Whether the job passes, and why not if it doesn't.
@@ -163,7 +183,14 @@ def hard_filter_job(job: Job, constraints_path: str) -> FilterResult:
         "employment_type": job.employment_type,
         "description": job.description,
     }
-    return check_hard_filters(job_dict, constraints)
+    result = check_hard_filters(job_dict, constraints)
+    if not result.passed:
+        return result
+
+    cooldown_days = constraints.get("company_cooldown_days")
+    if cooldown_days:
+        return await applications_service.check_cooldown_for_company(session, job.company, cooldown_days)
+    return result
 
 
 async def record_analysis(session: AsyncSession, job: Job, analysis: JobFitAnalysis) -> JobAnalysis:
@@ -197,6 +224,62 @@ async def record_analysis(session: AsyncSession, job: Job, analysis: JobFitAnaly
     session.add(row)
     await session.commit()
     return row
+
+
+async def analyze_job(session: AsyncSession, job: Job, settings: Settings | None = None) -> Job:
+    """Run hard-filter + score against a job and persist the outcome.
+
+    The one shared pipeline behind both trigger points: the user-initiated
+    POST /jobs/{job_id}/analyze route and /explore/save's auto-analyze
+    background task (see app/api/routes/explore.py) — a job no longer has
+    to sit at DISCOVERED until someone opens its Job Detail page (see
+    memory/known-gaps.md, "Orchestration exists now"). Same
+    hard_filter_job() -> score_job() -> record_analysis() order either
+    trigger uses.
+
+    When `job` is still at its just-saved DEFAULT_JOB_STATUS, this also
+    guards against those same two triggers racing each other on one
+    freshly-saved job (a user clicking Analyze before the background
+    auto-analyze task finished) — re-checking the persisted status right
+    before the expensive Claude call catches whichever of the two loses
+    the race, skipping a redundant paid call rather than both scoring the
+    same job independently. Scoped to that DEFAULT_JOB_STATUS case only,
+    never to an intentional re-analyze of an already-scored job (a job
+    passed in at REVIEW_REQUIRED/READY_FOR_REVIEW/REJECT always runs, per
+    the "adds a new analysis row" behavior below).
+
+    Args:
+        session: Database session.
+        job: Already-loaded Job ORM row.
+        settings: Optional Settings instance (defaults to get_settings()) —
+            accepted explicitly so a background task started outside a
+            request doesn't have to rely on the route's cached settings.
+
+    Returns:
+        Job: The same job, mutated in place (job.status reflects the
+            outcome — REJECT, or job_scorer.decide()'s verdict — or is
+            left untouched if another concurrent analyze already won the
+            race described above).
+    """
+    settings = settings or get_settings()
+    was_unanalyzed = job.status == DEFAULT_JOB_STATUS
+
+    hard_filter_result = await hard_filter_job(session, job, settings.constraints_path)
+    if not hard_filter_result.passed:
+        await set_job_status(session, job, job_scorer.REJECT_STATUS)
+        return job
+
+    if was_unanalyzed:
+        current_status = await session.scalar(select(Job.status).where(Job.id == job.id))
+        if current_status is not None and current_status != DEFAULT_JOB_STATUS:
+            return job
+
+    analysis = await asyncio.to_thread(
+        job_scorer.score_job, job.description, settings.skills_path, settings.evidence_path, settings.constraints_path
+    )
+    await record_analysis(session, job, analysis)
+    await set_job_status(session, job, job_scorer.decide(analysis))
+    return job
 
 
 async def get_job(session: AsyncSession, job_id: int) -> JobDetail | None:

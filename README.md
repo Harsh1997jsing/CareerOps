@@ -8,13 +8,16 @@ applications — but you always click submit yourself, in your own browser.
 All six originally planned phases are built (see `memory/` for what was
 built in each phase and why, and `memory/known-gaps.md` for what's still
 missing). The score → generate → validate → apply half now runs as a real
-pipeline, user-triggered per job from the frontend's Job Detail page
-(`POST /jobs/{id}/analyze`, `POST /jobs/{id}/documents`) — but nothing
-automatically triggers it when a job is discovered/saved, and there's
-still no scheduler running ingestion on its own (`apscheduler` is in
-`requirements.txt`, unused). The API, migrations, and full Docker stack
-(Postgres + pgAdmin + the API itself) have been run and verified
-end-to-end against a real Postgres instance.
+pipeline: `POST /jobs/{id}/analyze` and `POST /jobs/{id}/documents` cover
+the user-triggered path from the frontend's Job Detail page, and
+`POST /explore/save` now also queues that same analysis automatically in
+the background the moment a job is saved — a saved job no longer has to
+sit unscored until someone opens Job Detail. There's still no scheduler
+running ingestion on its own (`apscheduler` is in `requirements.txt`,
+unused) — auto-analyze only fires on save, nothing searches for new jobs
+by itself. The API, migrations, and full Docker stack (Postgres + pgAdmin
++ the API itself) have been run and verified end-to-end against a real
+Postgres instance.
 
 ## Prerequisites
 
@@ -338,8 +341,9 @@ documents → validate → review → apply — is wired end-to-end now, not jus
 built in isolation: `POST /jobs/{id}/analyze` and
 `POST /jobs/{id}/documents` (`app/api/routes/jobs.py`) run it per job, and
 the frontend's Job Detail page (`/jobs/:jobId`) is the review surface,
-including the approve/reject/open/mark-applied bar. It's all still
-user-triggered per job, not automatic on ingestion — see
+including the approve/reject/open/mark-applied bar. Analysis (not
+document generation) also now runs automatically the moment a job is
+saved — `POST /explore/save` queues it as a background task, see
 `memory/known-gaps.md`. The frontend's sidebar is Dashboard + AI Search
 (a chat-driven search that picks which of Explore/Scrape/Targets to use
 per query); those three stay mounted and reachable by direct URL, just

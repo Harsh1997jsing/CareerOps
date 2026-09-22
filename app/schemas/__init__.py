@@ -19,14 +19,10 @@ from app.schemas.domain import (
     GeneratedDocumentItem,
     JobDetail,
     JobListItem,
-    Tenant,
-    User,
     UserContext,
 )
 
 __all__ = [
-    "Tenant",
-    "User",
     "UserContext",
     "ApplicationItem",
     "GeneratedDocumentItem",

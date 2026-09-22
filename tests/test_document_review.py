@@ -64,5 +64,48 @@ async def test_review_generated_document_runs_both_checks_and_records_result(tmp
 
     mock_claims.assert_called_once_with("some text", "data/evidence.yaml")
     mock_ats.assert_called_once_with("resume.docx", "some text", ["Test Candidate"], str(tmp_path))
-    mock_record.assert_called_once_with(1, True, True)
+    mock_record.assert_called_once_with(1, True, True, session=None)
     assert result.ready_for_review
+
+
+async def test_review_generated_document_threads_the_caller_session_through(tmp_path, db_session):
+    claim_outcome = ClaimValidationOutcome(
+        passed=True,
+        result=ClaimCheckResult(all_verified=True, items=[], blocking_claims=[]),
+    )
+    ats_outcome = AtsValidationResult(passed=True, reasons=[])
+
+    with patch("app.services.document_review.validate_claims", return_value=claim_outcome), \
+         patch("app.services.document_review.validate_ats", return_value=ats_outcome), \
+         patch("app.services.document_review.record_validation_result", AsyncMock()) as mock_record:
+        await review_generated_document(
+            document_id=1, document_text="some text", docx_path="resume.docx",
+            evidence_path="data/evidence.yaml", required_snippets=[], workdir=str(tmp_path),
+            session=db_session,
+        )
+
+    mock_record.assert_called_once_with(1, True, True, session=db_session)
+
+
+async def test_review_generated_document_records_ats_as_none_when_libreoffice_missing(tmp_path):
+    # RuntimeError is ats_validator.convert_docx_to_pdf()'s documented
+    # failure mode when LibreOffice isn't installed — the request must
+    # still succeed, with ats_check_passed recorded as None ("didn't
+    # run"), not as a false pass or a false fail, and never let the
+    # RuntimeError itself propagate out of this function.
+    claim_outcome = ClaimValidationOutcome(
+        passed=True,
+        result=ClaimCheckResult(all_verified=True, items=[], blocking_claims=[]),
+    )
+
+    with patch("app.services.document_review.validate_claims", return_value=claim_outcome), \
+         patch("app.services.document_review.validate_ats", side_effect=RuntimeError("soffice not found")), \
+         patch("app.services.document_review.record_validation_result", AsyncMock()) as mock_record:
+        result = await review_generated_document(
+            document_id=1, document_text="some text", docx_path="resume.docx",
+            evidence_path="data/evidence.yaml", required_snippets=[], workdir=str(tmp_path),
+        )
+
+    mock_record.assert_called_once_with(1, True, None, session=None)
+    assert not result.ats_check.passed
+    assert not result.ready_for_review

@@ -8,6 +8,7 @@ Implements:
 """
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -18,11 +19,9 @@ from app.core.exceptions import (
     InvalidTokenError,
     ProtectedAdminError,
     TenantAlreadyExistsError,
-    TenantNotFoundError,
     TokenError,
     TokenExpiredError,
     UserAlreadyExistsError,
-    UserNotFoundError,
 )
 from app.core.security import (
     create_access_token,
@@ -40,10 +39,8 @@ __all__ = [
     "UserContext",
     "AuthError",
     "InvalidCredentialsError",
-    "UserNotFoundError",
     "UserAlreadyExistsError",
     "ProtectedAdminError",
-    "TenantNotFoundError",
     "TenantAlreadyExistsError",
     "TokenError",
     "TokenExpiredError",
@@ -102,7 +99,11 @@ async def create_tenant(session: AsyncSession, name: str, slug: str) -> Tenant:
         Tenant: Newly created tenant record.
 
     Raises:
-        TenantAlreadyExistsError: If a tenant with the same slug already exists.
+        TenantAlreadyExistsError: If a tenant with the same slug already
+            exists — either seen by the check below, or, for two
+            concurrent requests racing past that check together, caught
+            from the unique-constraint violation the second commit hits
+            (same pattern as app/sources/common.py:insert_jobs()).
     """
     clean_slug = slug.strip().lower()
     if await session.scalar(select(Tenant).where(Tenant.slug == clean_slug)) is not None:
@@ -110,7 +111,11 @@ async def create_tenant(session: AsyncSession, name: str, slug: str) -> Tenant:
 
     tenant = Tenant(name=name.strip(), slug=clean_slug)
     session.add(tenant)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise TenantAlreadyExistsError(f"Tenant slug '{clean_slug}' already exists") from exc
     await session.refresh(tenant)
     return tenant
 
@@ -188,7 +193,11 @@ async def create_user(
         User: Newly created User instance.
 
     Raises:
-        UserAlreadyExistsError: If the email already exists in this tenant.
+        UserAlreadyExistsError: If the email already exists in this tenant
+            — either seen by the check below, or, for two concurrent
+            requests racing past that check together, caught from the
+            unique-constraint violation the second commit hits (same
+            pattern as app/sources/common.py:insert_jobs()).
         ValueError: If role is invalid.
     """
     clean_email = email.strip().lower()
@@ -211,7 +220,11 @@ async def create_user(
         is_active=True,
     )
     session.add(user)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise UserAlreadyExistsError(f"User with email '{clean_email}' already exists in tenant") from exc
     await session.refresh(user)
     return user
 

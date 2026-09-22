@@ -134,7 +134,7 @@ class SuggestDocumentEditRequest(BaseModel):
     Attributes:
         feedback: Free-text description of the desired change.
     """
-    feedback: str
+    feedback: str = Field(min_length=1)
 
 
 class DocumentEditSuggestionOut(BaseModel):
@@ -399,12 +399,20 @@ class UserCreateRequest(BaseModel):
     """Payload to provision a new user under the current admin's tenant.
 
     Attributes:
-        email: New user's email address.
+        email: New user's email address — a lightweight `local@domain.tld`
+            shape check, not full RFC/deliverability validation (which
+            `pydantic.EmailStr`'s `email-validator` backend provides, but
+            also rejects reserved-use TLDs like `.local` — this is a
+            local-first tool whose own default admin is
+            `admin@careerops.local`, so that's the wrong strictness here).
+            A full code audit pass caught `{"email": ""}` previously
+            creating a permanent, unusable user row; this catches that
+            without breaking the project's own `.local` convention.
         password: Initial password (min 8 characters — audit finding F7,
             previously unvalidated).
         role: User role ('user' or 'admin', defaults to 'user').
     """
-    email: str
+    email: str = Field(min_length=3, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     password: str = Field(min_length=8)
     role: str = "user"
 
@@ -413,13 +421,14 @@ class TenantCreateRequest(BaseModel):
     """Payload to register a new tenant organization.
 
     Attributes:
-        name: Organization display name.
+        name: Organization display name (non-empty — a full code audit
+            pass caught an empty string previously being accepted).
         slug: Normalized identifier slug — lowercase letters, digits, and
             hyphens only (audit finding F7, previously unvalidated: any
             string, including spaces/uppercase, was accepted and merely
             lowercased, not rejected).
     """
-    name: str
+    name: str = Field(min_length=1)
     slug: str = Field(min_length=1, max_length=63, pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 

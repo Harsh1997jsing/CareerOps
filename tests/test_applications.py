@@ -3,14 +3,10 @@ from unittest.mock import AsyncMock, patch
 
 from app.models import Application
 from app.services.applications import (
-    APPROVED_STATUS,
-    REJECTED_STATUS,
-    approve_application,
     check_cooldown_for_company,
     create_application,
     get_application_context,
     get_application_for_job,
-    reject_application,
     set_application_status,
 )
 from tests.conftest import make_job
@@ -36,6 +32,41 @@ async def test_create_application_is_idempotent(db_session):
     second = await create_application(db_session, job_id=1)
 
     assert first.id == second.id
+
+
+async def test_create_application_concurrent_race_returns_the_winners_row(db_session):
+    # uq_applications_job_id backs create_application()'s get-or-create —
+    # simulates two concurrent POST /jobs/{id}/documents both passing the
+    # "does one already exist" pre-check before either commits: the
+    # "other" request's row is inserted directly here (bypassing this
+    # call's own pre-check entirely), then this call's *first* scalars()
+    # is forced to report "not found" (as if it ran before the other's
+    # commit) — its real INSERT+commit is what hits the unique constraint
+    # and must recover by returning the existing row, not raise or
+    # duplicate it. The *second* scalars() (the except block's recovery
+    # re-query) falls through to the real query, since by then the
+    # winner's row genuinely is visible.
+    from types import SimpleNamespace
+
+    await make_job(db_session)
+    winner = Application(job_id=1, status="READY_FOR_REVIEW")
+    db_session.add(winner)
+    await db_session.commit()
+    winner_id = winner.id  # captured before the race — see rollback note below
+
+    original_scalars = db_session.scalars
+    calls = {"n": 0}
+
+    async def fake_scalars(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(first=lambda: None)
+        return await original_scalars(*args, **kwargs)
+
+    with patch.object(db_session, "scalars", side_effect=fake_scalars):
+        result = await create_application(db_session, job_id=1)
+
+    assert result.id == winner_id
 
 
 async def test_get_application_for_job_returns_item_when_found(db_session):
@@ -78,26 +109,6 @@ async def test_set_application_status_updates_existing_row(db_session):
 async def test_set_application_status_no_ops_when_missing(db_session):
     # Mirrors the old raw-SQL UPDATE's silent no-op on zero matched rows.
     await set_application_status(db_session, application_id=999, status="APPROVED")
-
-
-async def test_approve_application_uses_approved_status(db_session):
-    await make_job(db_session)
-    db_session.add(Application(id=7, job_id=1, status="READY_FOR_REVIEW"))
-    await db_session.commit()
-
-    await approve_application(db_session, application_id=7)
-
-    assert (await db_session.get(Application, 7)).status == APPROVED_STATUS
-
-
-async def test_reject_application_uses_rejected_status(db_session):
-    await make_job(db_session)
-    db_session.add(Application(id=7, job_id=1, status="READY_FOR_REVIEW"))
-    await db_session.commit()
-
-    await reject_application(db_session, application_id=7)
-
-    assert (await db_session.get(Application, 7)).status == REJECTED_STATUS
 
 
 async def test_get_application_context_returns_none_when_missing(db_session):

@@ -3,7 +3,7 @@ from datetime import date, datetime
 import pandas as pd
 from unittest.mock import patch
 
-from app.sources.jobspy_source import _matches_experience, fetch_jobs, normalize_job
+from app.sources.jobspy_source import _experience_haystack, fetch_jobs, normalize_job
 
 RAW_ROW = {
     "id": "in-123",
@@ -149,20 +149,22 @@ def test_fetch_jobs_caps_at_max_per_run():
     assert len(jobs) == 50
 
 
-def test_matches_experience_checks_job_level_and_experience_range():
-    assert _matches_experience({"job_level": "Entry level"}, "entry")
-    assert _matches_experience({"experience_range": "3-5 Yrs"}, "3-5")
-    assert not _matches_experience({"job_level": "Entry level"}, "senior")
+def test_experience_haystack_includes_job_level_and_experience_range():
+    assert "Entry level" in _experience_haystack({"job_level": "Entry level"})
+    assert "3-5 Yrs" in _experience_haystack({"experience_range": "3-5 Yrs"})
 
 
-def test_matches_experience_blank_query_matches_everything():
-    assert _matches_experience({}, "")
-    assert _matches_experience({}, "   ")
+def test_experience_haystack_handles_missing_and_nan_fields():
+    assert _experience_haystack({"job_level": float("nan")}).strip() == ""
+    assert _experience_haystack({}).strip() == ""
 
 
-def test_matches_experience_handles_missing_and_nan_fields():
-    assert not _matches_experience({"job_level": float("nan")}, "senior")
-    assert not _matches_experience({}, "senior")
+def test_matches_experience_end_to_end_via_haystack():
+    from app.sources.common import matches_experience
+
+    assert matches_experience(_experience_haystack({"job_level": "Entry level"}), "entry")
+    assert not matches_experience(_experience_haystack({"job_level": "Entry level"}), "senior")
+    assert not matches_experience(_experience_haystack({"job_level": float("nan")}), "senior")
 
 
 def test_fetch_jobs_filters_by_experience():

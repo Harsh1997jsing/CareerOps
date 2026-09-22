@@ -1,10 +1,15 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from sqlalchemy import select, update
 
 from app.llm.schemas import JobFitAnalysis
-from app.models import GeneratedDocument, JobAnalysis
+from app.models import GeneratedDocument, Job, JobAnalysis
 from app.services.jobs import (
     DEFAULT_JOB_STATUS,
     REJECTED_JOB_STATUS,
+    analyze_job,
     get_job,
     get_job_by_id,
     hard_filter_job,
@@ -96,6 +101,20 @@ async def test_list_jobs_filters_by_description_keyword_case_insensitive(db_sess
 
     assert len(jobs) == 1
     assert jobs[0].job_id == 1
+
+
+async def test_list_jobs_treats_a_literal_percent_in_q_as_literal_not_a_wildcard(db_session):
+    # Full code audit finding: q wasn't escaped before .ilike(f"%{q}%"),
+    # so searching q="50%" was silently read as "contains 50" (the
+    # trailing "%" absorbed as a no-op wildcard) rather than requiring a
+    # literal "%" after the 50 — job_id=2 ("50 years", no percent sign)
+    # would wrongly match too before this fix.
+    await make_job(db_session, job_id=1, description="Bonus: up to 50% equity")
+    await make_job(db_session, job_id=2, description="Minimum 50 years combined team experience")
+
+    jobs = await list_jobs(db_session, q="50%")
+
+    assert [j.job_id for j in jobs] == [1]
 
 
 async def test_list_jobs_filters_by_posted_within_days_using_posted_at(db_session):
@@ -231,13 +250,13 @@ def _write_constraints(tmp_path):
 
 async def test_hard_filter_job_passes_within_constraints(db_session, tmp_path):
     job = await make_job(db_session, location="Bangalore", employment_type="Full-time")
-    result = hard_filter_job(job, _write_constraints(tmp_path))
+    result = await hard_filter_job(db_session, job, _write_constraints(tmp_path))
     assert result.passed
 
 
 async def test_hard_filter_job_fails_disallowed_location(db_session, tmp_path):
     job = await make_job(db_session, location="Mumbai", employment_type="Full-time")
-    result = hard_filter_job(job, _write_constraints(tmp_path))
+    result = await hard_filter_job(db_session, job, _write_constraints(tmp_path))
     assert not result.passed
     assert any("location" in r for r in result.reasons)
 
@@ -247,6 +266,143 @@ async def test_hard_filter_job_fails_excluded_keyword(db_session, tmp_path):
         db_session, location="Remote", employment_type="Full-time",
         description="This is an unpaid internship opportunity.",
     )
-    result = hard_filter_job(job, _write_constraints(tmp_path))
+    result = await hard_filter_job(db_session, job, _write_constraints(tmp_path))
     assert not result.passed
     assert any("excluded keyword" in r for r in result.reasons)
+
+
+async def test_hard_filter_job_fails_company_cooldown(db_session, tmp_path):
+    from datetime import datetime, timedelta
+
+    from app.models import CompanyApplicationHistory
+
+    path = tmp_path / "constraints.yaml"
+    path.write_text(
+        "allowed_locations: [Remote]\n"
+        "employment_types: [Full-time]\n"
+        "minimum_experience_years: 0\n"
+        "acceptable_experience_gap_years: 1\n"
+        "exclude_keywords: []\n"
+        "company_cooldown_days: 30\n"
+    )
+    job = await make_job(db_session, location="Remote", employment_type="Full-time", company="Acme")
+    db_session.add(CompanyApplicationHistory(company="Acme", applied_at=datetime.now() - timedelta(days=5)))
+    await db_session.commit()
+
+    result = await hard_filter_job(db_session, job, str(path))
+
+    assert not result.passed
+    assert any("Acme" in r for r in result.reasons)
+
+
+async def test_hard_filter_job_passes_company_cooldown_when_no_history(db_session, tmp_path):
+    path = tmp_path / "constraints.yaml"
+    path.write_text(
+        "allowed_locations: [Remote]\n"
+        "employment_types: [Full-time]\n"
+        "minimum_experience_years: 0\n"
+        "acceptable_experience_gap_years: 1\n"
+        "exclude_keywords: []\n"
+        "company_cooldown_days: 30\n"
+    )
+    job = await make_job(db_session, location="Remote", employment_type="Full-time", company="NewCo")
+
+    result = await hard_filter_job(db_session, job, str(path))
+
+    assert result.passed
+
+
+def _fake_settings(tmp_path):
+    # analyze_job() only ever reads .constraints_path/.skills_path/
+    # .evidence_path off whatever it's handed — a real Settings instance
+    # isn't needed, and score_job() itself is mocked below so
+    # skills_path/evidence_path are never actually opened.
+    return SimpleNamespace(
+        constraints_path=_write_constraints(tmp_path), skills_path="unused", evidence_path="unused",
+    )
+
+
+async def test_analyze_job_short_circuits_on_failed_hard_filter(db_session, tmp_path):
+    # Same pipeline order CLAUDE.md requires at the route level: a job
+    # outside allowed_locations never reaches the LLM scorer at all.
+    job = await make_job(db_session, location="Mumbai", employment_type="Full-time", status="DISCOVERED")
+
+    with patch("app.services.jobs.job_scorer.score_job") as mock_score:
+        updated = await analyze_job(db_session, job, _fake_settings(tmp_path))
+
+    mock_score.assert_not_called()
+    assert updated.status == "REJECT"
+
+
+async def test_analyze_job_scores_records_and_sets_status_when_hard_filter_passes(db_session, tmp_path):
+    job = await make_job(db_session, location="Bangalore", employment_type="Full-time", status="DISCOVERED")
+    analysis = JobFitAnalysis(
+        eligible=True, fit_score=90, confidence="high",
+        strong_matches=["Python"], missing_requirements=[], risks=[], summary="Great fit.",
+    )
+
+    with patch("app.services.jobs.job_scorer.score_job", return_value=analysis) as mock_score:
+        updated = await analyze_job(db_session, job, _fake_settings(tmp_path))
+
+    mock_score.assert_called_once()
+    assert updated.status == "READY_FOR_REVIEW"
+    persisted = (await db_session.scalars(select(JobAnalysis).where(JobAnalysis.job_id == job.id))).one()
+    assert persisted.fit_score == 90
+
+
+async def test_analyze_job_skips_scoring_when_a_concurrent_analyze_already_won(tmp_path):
+    # Simulates the auto-analyze-on-save background task racing a
+    # foreground /jobs/{id}/analyze click on the same freshly-saved job —
+    # two independent sessions on the same engine, exactly like two real
+    # concurrent requests each getting their own session from get_db().
+    # Reusing db_session's single session for both the "concurrent" update
+    # and analyze_job() itself would be a false pass: SQLAlchemy's
+    # ORM-enabled UPDATE auto-synchronizes any already-loaded object in
+    # that *same* session's identity map, silently updating `job.status`
+    # in-memory too — which two genuinely separate sessions never do for
+    # each other, and is exactly the gap this guard exists to cover.
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    try:
+        async with session_factory() as session_a:
+            job = await make_job(session_a, location="Bangalore", employment_type="Full-time", status="DISCOVERED")
+
+            # The "other" concurrent request, on its own independent
+            # session — session_a's identity map (and job.status in
+            # memory) stays exactly as it was, same as two real requests.
+            async with session_factory() as session_b:
+                await session_b.execute(update(Job).where(Job.id == job.id).values(status="REVIEW_REQUIRED"))
+                await session_b.commit()
+
+            with patch("app.services.jobs.job_scorer.score_job") as mock_score:
+                result = await analyze_job(session_a, job, _fake_settings(tmp_path))
+    finally:
+        await engine.dispose()
+
+    mock_score.assert_not_called()
+    assert result is job
+
+
+async def test_analyze_job_reanalyze_of_an_already_scored_job_is_not_blocked_by_the_guard(db_session, tmp_path):
+    # The race guard above must only ever apply to a job that was still
+    # DISCOVERED when analyze_job() was called — an intentional re-analyze
+    # of an already-scored job (any other status) always runs, per
+    # record_analysis()'s documented "adds a new row" behavior.
+    job = await make_job(db_session, location="Bangalore", employment_type="Full-time", status="REVIEW_REQUIRED")
+    analysis = JobFitAnalysis(
+        eligible=True, fit_score=88, confidence="high",
+        strong_matches=[], missing_requirements=[], risks=[], summary="Re-scored.",
+    )
+
+    with patch("app.services.jobs.job_scorer.score_job", return_value=analysis) as mock_score:
+        updated = await analyze_job(db_session, job, _fake_settings(tmp_path))
+
+    mock_score.assert_called_once()
+    assert updated.status == "READY_FOR_REVIEW"

@@ -18,22 +18,28 @@ def check_hard_filters(job: dict, constraints: dict) -> FilterResult:
     Args:
         job: Dictionary with keys 'location', 'employment_type', 'years_required',
             and 'description'.
-        constraints: Parsed dictionary from `data/constraints.yaml`.
+        constraints: Parsed dictionary from `data/constraints.yaml`. Missing
+            keys fail closed (an empty allowed_locations/employment_types,
+            or a 0 experience ceiling) rather than raising `KeyError` — an
+            incomplete constraints file should block a job as
+            unverifiable, not crash the request or silently admit it.
 
     Returns:
         FilterResult: Boolean pass status and list of violation explanations.
     """
     reasons = []
 
-    if job.get("location") not in constraints["allowed_locations"]:
+    if job.get("location") not in constraints.get("allowed_locations", []):
         reasons.append(f"location '{job.get('location')}' not in allowed_locations")
 
-    if job.get("employment_type") not in constraints["employment_types"]:
+    if job.get("employment_type") not in constraints.get("employment_types", []):
         reasons.append(f"employment_type '{job.get('employment_type')}' not allowed")
 
     years_required = job.get("years_required")
     if years_required is not None:
-        max_allowed = constraints["minimum_experience_years"] + constraints["acceptable_experience_gap_years"]
+        max_allowed = constraints.get("minimum_experience_years", 0) + constraints.get(
+            "acceptable_experience_gap_years", 0
+        )
         if years_required > max_allowed:
             reasons.append(f"requires {years_required} years, candidate ceiling is {max_allowed}")
 

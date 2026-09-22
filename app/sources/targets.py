@@ -13,7 +13,7 @@ import yaml
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.sources import greenhouse, lever
-from app.sources.common import insert_jobs
+from app.sources.common import insert_jobs, matches_experience
 
 COMPANIES_PATH = "data/companies.yaml"
 
@@ -64,29 +64,22 @@ def fetch_all_targets(path: str = COMPANIES_PATH) -> list[dict]:
     return jobs
 
 
-def _matches_experience(job: dict, experience: str) -> bool:
-    """Check a normalized target job's title/description against an experience query.
+def _experience_haystack(job: dict) -> str:
+    """Build the experience-matching text for a normalized target job.
 
     Greenhouse's and Lever's public job-board APIs have no standardized
     experience/seniority facet (unlike jobspy's job_level/experience_range
-    output fields), so there's no structured field to match here at all —
-    this is a plain keyword heuristic against the text every posting does
-    have, matching e.g. "senior" against a title like "Senior Backend
-    Engineer".
+    output fields), so this is a plain keyword heuristic against the text
+    every posting does have. See
+    `app/sources/common.py:matches_experience()` for the actual match.
 
     Args:
         job: Normalized job dict (from greenhouse.fetch_jobs/lever.fetch_jobs).
-        experience: Free-text experience query (e.g. "senior", "entry level").
 
     Returns:
-        bool: True if `experience` appears as a case-insensitive substring
-            of the job's title or description.
+        str: The job's title + description, space-joined.
     """
-    needle = experience.strip().lower()
-    if not needle:
-        return True
-    haystack = f"{job.get('title', '')} {job.get('description', '')}".lower()
-    return needle in haystack
+    return f"{job.get('title', '')} {job.get('description', '')}"
 
 
 async def search_all(path: str = COMPANIES_PATH, experience: str | None = None) -> list[dict]:
@@ -100,7 +93,7 @@ async def search_all(path: str = COMPANIES_PATH, experience: str | None = None) 
     Args:
         path: Filepath to company targets configuration.
         experience: Optional free-text experience-level filter, applied
-            app-side via _matches_experience since neither board API
+            app-side via matches_experience() since neither board API
             exposes a structured experience facet to filter on upstream.
 
     Returns:
@@ -108,7 +101,7 @@ async def search_all(path: str = COMPANIES_PATH, experience: str | None = None) 
     """
     jobs = await asyncio.to_thread(fetch_all_targets, path)
     if experience:
-        jobs = [job for job in jobs if _matches_experience(job, experience)]
+        jobs = [job for job in jobs if matches_experience(_experience_haystack(job), experience)]
     return jobs
 
 

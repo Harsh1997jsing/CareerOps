@@ -18,50 +18,19 @@ class ConfigurationError(CareerOpsError):
     """Raised when critical configuration settings or environment variables are missing."""
 
 
-class DatabaseError(CareerOpsError):
-    """Base exception for persistence and database access errors."""
+class LLMServiceError(CareerOpsError):
+    """Raised when a Claude API call fails (timeout, rate limit, connection error) or
+    returns output that can't be parsed into the schema the caller requested.
 
+    Wraps `anthropic.APIError`/`pydantic.ValidationError` from
+    `app/llm/anthropic_client.py:structured_call()` into one clear, catchable
+    type so a transient LLM failure maps to a specific 503 response
+    (`app/api/main.py`'s handler) instead of falling through to a generic
+    500 or, worse, an unhandled plain-text response.
+    """
 
-class DatabaseConnectionError(DatabaseError):
-    """Raised when the database engine fails to connect or ping the server."""
-
-
-class NotFoundError(CareerOpsError):
-    """Base exception for requested resources that cannot be located."""
-
-
-class JobNotFoundError(NotFoundError):
-    """Raised when a specific job cannot be found in the database."""
-
-    def __init__(self, job_id: int | str) -> None:
-        super().__init__(f"Job with ID '{job_id}' not found.")
-        self.job_id = job_id
-
-
-class ApplicationNotFoundError(NotFoundError):
-    """Raised when an application record cannot be found."""
-
-    def __init__(self, application_id: int | str) -> None:
-        super().__init__(f"Application with ID '{application_id}' not found.")
-        self.application_id = application_id
-
-
-class UserNotFoundError(NotFoundError):
-    """Raised when a user account cannot be found."""
-
-    def __init__(self, identifier: int | str = "") -> None:
-        msg = f"User '{identifier}' not found." if identifier else "User not found."
-        super().__init__(msg)
-        self.identifier = identifier
-
-
-class TenantNotFoundError(NotFoundError):
-    """Raised when a tenant organization cannot be found."""
-
-    def __init__(self, slug_or_id: int | str = "") -> None:
-        msg = f"Tenant '{slug_or_id}' not found." if slug_or_id else "Tenant not found."
-        super().__init__(msg)
-        self.slug_or_id = slug_or_id
+    def __init__(self, message: str = "The AI service is temporarily unavailable. Please try again.") -> None:
+        super().__init__(message)
 
 
 class ConflictError(CareerOpsError):
@@ -94,13 +63,6 @@ class InvalidCredentialsError(AuthError):
     """Raised when authentication credentials (email/password/tenant) are invalid."""
 
     def __init__(self, message: str = "Invalid email, password, or tenant.") -> None:
-        super().__init__(message)
-
-
-class ForbiddenError(AuthError):
-    """Raised when an authenticated user lacks required permissions or roles."""
-
-    def __init__(self, message: str = "You do not have permission to perform this action.") -> None:
         super().__init__(message)
 
 

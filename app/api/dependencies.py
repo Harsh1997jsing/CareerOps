@@ -8,7 +8,7 @@ from app.core import (
     decode_access_token,
     get_db,
 )
-from app.services.auth import UserContext, get_user_by_id
+from app.services.auth import UserContext, get_tenant_by_id, get_user_by_id
 
 security_bearer = HTTPBearer(auto_error=False)
 
@@ -80,10 +80,19 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # tenant_slug is re-read from the DB here, same as every other field on
+    # UserContext — reading it straight from the JWT payload instead (as
+    # this used to) would leave it stale for up to
+    # JWT_ACCESS_TOKEN_EXPIRE_MINUTES if a tenant's slug were ever changed
+    # after the token was issued, even though nothing else on this object
+    # would be.
+    tenant = await get_tenant_by_id(session, user.tenant_id)
+    tenant_slug = tenant.slug if tenant is not None else payload.get("tenant_slug", "default")
+
     return UserContext(
         user_id=user.id,
         tenant_id=user.tenant_id,
-        tenant_slug=payload.get("tenant_slug", "default"),
+        tenant_slug=tenant_slug,
         email=user.email,
         role=user.role,
         is_default_admin=user.is_default_admin,

@@ -43,3 +43,24 @@ def test_company_cooldown_allows_after_window():
     applied = [datetime.now() - timedelta(days=45)]
     result = check_company_cooldown("Acme", applied, cooldown_days=30)
     assert result.passed
+
+
+def test_fails_closed_when_constraints_yaml_is_missing_keys():
+    # A KeyError here would crash the whole /jobs/{id}/analyze request
+    # (see app/services/jobs.py:hard_filter_job) instead of just failing
+    # this one job — missing config should block, not crash or silently
+    # admit an unverifiable job.
+    job = {"location": "Bangalore", "employment_type": "Full-time", "description": ""}
+    result = check_hard_filters(job, {})
+    assert not result.passed
+    assert any("location" in r for r in result.reasons)
+    assert any("employment_type" in r for r in result.reasons)
+
+
+def test_years_required_check_is_skipped_without_a_ceiling_when_not_provided():
+    # years_required is only ever checked when the job itself provides it —
+    # confirms the fail-closed default (0 + 0 = 0 ceiling) doesn't get
+    # exercised at all for the common case (no source populates years_required).
+    job = {"location": "Bangalore", "employment_type": "Full-time", "description": ""}
+    result = check_hard_filters(job, {"allowed_locations": ["Bangalore"], "employment_types": ["Full-time"]})
+    assert result.passed

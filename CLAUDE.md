@@ -195,11 +195,15 @@ not generated:
    removed in favor of `../CareerOps-frontend` (React + Vite + TypeScript).
    Its sidebar is Dashboard + AI Search; a Job Detail page
    (`/jobs/:jobId`) covers fit analysis, document generation, and
-   approve/reject/open/mark-applied — see `memory/known-gaps.md` for what
-   still isn't automatic (nothing triggers analyze/generate on its own;
-   it's all user-triggered per job). `app/services/jobs.py` (list_jobs,
-   get_job, list_generated_documents, hard_filter_job, record_analysis)
-   and `app/services/applications.py` (get_application_context,
+   approve/reject/open/mark-applied. Analysis also now runs automatically
+   the moment a job is saved (`POST /explore/save` queues
+   `app/services/jobs.py`'s `analyze_job()` as a background task — see
+   `app/api/routes/explore.py`'s `_auto_analyze()`), not only from the Job
+   Detail page's Analyze button; see `memory/known-gaps.md` for what's
+   still manual (document generation, and any scheduled/recurring
+   ingestion sweep). `app/services/jobs.py` (list_jobs, get_job,
+   list_generated_documents, hard_filter_job, record_analysis,
+   analyze_job) and `app/services/applications.py` (get_application_context,
    create_application, approve/reject_application,
    check_cooldown_for_company) are its DB layer — split by resource, not
    one combined module. Approve/Reject sets `applications.status` to

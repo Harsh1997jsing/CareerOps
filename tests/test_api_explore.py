@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app.api.dependencies import get_current_user
 from app.api.main import app
 from app.core import get_db
+from app.sources.common import description_hash
 from app.sources.mcp.capabilities import build_capability_matrix
 from mcp.types import Tool
 from tests.conftest import FAKE_USER_CONTEXT
@@ -136,3 +137,63 @@ def test_save_passes_posted_at_through_to_insert_jobs():
     assert response.status_code == 200
     job = mock_insert.call_args[0][1][0]
     assert job["posted_at"] is not None
+
+
+def test_save_queues_auto_analyze_only_on_a_real_insert():
+    # BackgroundTasks callbacks run after the response is sent but still
+    # within TestClient's synchronous request — patching _auto_analyze
+    # itself (rather than letting it run for real) keeps this test from
+    # needing a live DB/LLM.
+    with patch("app.api.routes.explore.insert_jobs", AsyncMock(return_value=1)), \
+         patch("app.api.routes.explore._auto_analyze", AsyncMock()) as mock_auto_analyze:
+        response = client.post("/explore/save", json=RESULT)
+
+    assert response.status_code == 200
+    mock_auto_analyze.assert_called_once()
+    # Recomputed server-side, same hash insert_jobs was called with.
+    called_hash = mock_auto_analyze.call_args[0][0]
+    assert called_hash == description_hash(RESULT["description"])
+
+
+def test_save_does_not_queue_auto_analyze_for_a_duplicate():
+    with patch("app.api.routes.explore.insert_jobs", AsyncMock(return_value=0)), \
+         patch("app.api.routes.explore._auto_analyze", AsyncMock()) as mock_auto_analyze:
+        response = client.post("/explore/save", json=RESULT)
+
+    assert response.status_code == 200
+    mock_auto_analyze.assert_not_called()
+
+
+async def test_auto_analyze_runs_the_pipeline_for_a_job_matching_the_hash(db_session):
+    from app.api.routes.explore import _auto_analyze
+    from tests.conftest import make_job
+
+    job = await make_job(db_session, description_hash="a" * 64, status="DISCOVERED")
+
+    with patch("app.api.routes.explore.get_session_factory", return_value=lambda: db_session), \
+         patch("app.api.routes.explore.jobs_service.analyze_job", AsyncMock()) as mock_analyze:
+        await _auto_analyze("a" * 64)
+
+    mock_analyze.assert_called_once()
+    assert mock_analyze.call_args[0][1].id == job.id
+
+
+async def test_auto_analyze_is_a_noop_when_no_job_matches_the_hash(db_session):
+    from app.api.routes.explore import _auto_analyze
+
+    with patch("app.api.routes.explore.get_session_factory", return_value=lambda: db_session), \
+         patch("app.api.routes.explore.jobs_service.analyze_job", AsyncMock()) as mock_analyze:
+        await _auto_analyze("does-not-exist")
+
+    mock_analyze.assert_not_called()
+
+
+async def test_auto_analyze_swallows_an_analyze_job_failure(db_session):
+    from app.api.routes.explore import _auto_analyze
+    from tests.conftest import make_job
+
+    await make_job(db_session, description_hash="b" * 64, status="DISCOVERED")
+
+    with patch("app.api.routes.explore.get_session_factory", return_value=lambda: db_session), \
+         patch("app.api.routes.explore.jobs_service.analyze_job", AsyncMock(side_effect=RuntimeError("boom"))):
+        await _auto_analyze("b" * 64)  # must not raise

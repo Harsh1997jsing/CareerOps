@@ -9,30 +9,6 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class Tenant(BaseModel):
-    """Domain model representing a tenant organization."""
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    name: str
-    slug: str
-    is_active: bool = True
-    created_at: datetime | str | None = None
-
-
-class User(BaseModel):
-    """Domain model representing a user account."""
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    tenant_id: int
-    email: str
-    role: str = "user"
-    is_default_admin: bool = False
-    is_active: bool = True
-    created_at: datetime | str | None = None
-
-
 class UserContext(BaseModel):
     """Authenticated user context extracted from JWT claims."""
     model_config = ConfigDict(from_attributes=True)

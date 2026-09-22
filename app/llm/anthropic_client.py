@@ -7,11 +7,12 @@ here — this relies entirely on the SDK's own default retry behavior
 logic lived here; it never did).
 """
 
+import anthropic
 from anthropic import Anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import get_settings
-from app.core.exceptions import ConfigurationError
+from app.core.exceptions import ConfigurationError, LLMServiceError
 
 _client: Anthropic | None = None
 
@@ -44,9 +45,15 @@ def structured_call(prompt: str, output_schema: type[BaseModel], max_tokens: int
 
     Uses the model specified in `ANTHROPIC_MODEL` (defaulting to `claude-sonnet-4-6`).
     Calls `messages.parse()` with `output_format=output_schema` to guarantee that
-    the model's response matches the requested structure. Raises if the API call fails
-    or validation cannot be completed — callers should catch and log, never silently
-    swallow a failed analysis.
+    the model's response matches the requested structure.
+
+    A failed API call (timeout, rate limit, connection error) or a response
+    that doesn't validate against `output_schema` is wrapped into
+    `LLMServiceError` — one clear, catchable type every caller can let
+    propagate up to `app/api/main.py`'s registered handler (503 JSON)
+    rather than needing its own try/except (previously: none of this
+    function's 8 call sites caught anything, so any of these failures fell
+    through to a bare, undifferentiated 500).
 
     Args:
         prompt: User prompt text sent to Claude.
@@ -57,16 +64,21 @@ def structured_call(prompt: str, output_schema: type[BaseModel], max_tokens: int
         BaseModel: An instance of `output_schema` populated with Claude's structured response.
 
     Raises:
-        anthropic.APIError: If the Anthropic API request fails or times out.
-        pydantic.ValidationError: If the response cannot be parsed into `output_schema`.
+        LLMServiceError: If the Anthropic API request fails, times out, or
+            its response can't be parsed into `output_schema`.
     """
     client = get_client()
     model = get_settings().anthropic_model
 
-    response = client.messages.parse(
-        model=model,
-        max_tokens=max_tokens,
-        output_format=output_schema,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = client.messages.parse(
+            model=model,
+            max_tokens=max_tokens,
+            output_format=output_schema,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError as exc:
+        raise LLMServiceError(f"Claude API call failed: {exc}") from exc
+    except ValidationError as exc:
+        raise LLMServiceError(f"Claude's response didn't match the expected structure: {exc}") from exc
     return response.parsed_output

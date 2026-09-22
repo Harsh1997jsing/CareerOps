@@ -14,6 +14,7 @@ from jobspy import scrape_jobs
 from app.sources.common import (
     MAX_JOBS_PER_RUN,
     description_hash,
+    matches_experience,
     normalize_employment_type,
     normalize_location,
     safe_int,
@@ -122,31 +123,24 @@ def normalize_job(row: dict) -> dict:
     }
 
 
-def _matches_experience(row: dict, experience: str) -> bool:
-    """Check a raw jobspy row's experience-level fields against a search string.
+def _experience_haystack(row: dict) -> str:
+    """Build the experience-matching text for a raw jobspy row.
 
     jobspy.scrape_jobs() has no experience/seniority filter parameter
     (verified against the installed python-jobspy source) — it's exposed
     only as an output field, and only for two of the five allowed sites:
     LinkedIn's `job_level` (e.g. "Entry level") isn't reachable here since
     LinkedIn is never scraped (CLAUDE.md rule 2), but Naukri's
-    `experience_range` (e.g. "3-5 Yrs") is. This substring-matches against
-    whatever's present rather than requiring a fixed vocabulary, since
-    sites don't agree on one.
+    `experience_range` (e.g. "3-5 Yrs") is. See
+    `app/sources/common.py:matches_experience()` for the actual match.
 
     Args:
         row: Raw jobspy DataFrame record, before normalize_job() strips it.
-        experience: Free-text experience query (e.g. "senior", "3-5").
 
     Returns:
-        bool: True if the row's job_level/experience_range field contains
-            `experience` as a case-insensitive substring.
+        str: The row's job_level + experience_range fields, space-joined.
     """
-    needle = experience.strip().lower()
-    if not needle:
-        return True
-    haystack = " ".join([_clean_str(row.get("job_level")), _clean_str(row.get("experience_range"))]).lower()
-    return needle in haystack
+    return " ".join([_clean_str(row.get("job_level")), _clean_str(row.get("experience_range"))])
 
 
 def fetch_jobs(
@@ -169,7 +163,7 @@ def fetch_jobs(
         sites: List of job sites to scrape (defaults to ALLOWED_SITES).
         results_wanted: Target number of postings (capped at MAX_JOBS_PER_RUN = 50).
         experience: Optional free-text experience-level filter, applied
-            app-side after scraping (see _matches_experience) since jobspy
+            app-side after scraping (see matches_experience) since jobspy
             has no matching input parameter. Postings from sites that
             don't report an experience field are dropped when this is set.
         **kwargs: Additional parameters forwarded to `jobspy.scrape_jobs`.
@@ -209,6 +203,6 @@ def fetch_jobs(
 
     rows = df.to_dict("records")
     if experience:
-        rows = [row for row in rows if _matches_experience(row, experience)]
+        rows = [row for row in rows if matches_experience(_experience_haystack(row), experience)]
     rows = rows[:limit]
     return [normalize_job(row) for row in rows]

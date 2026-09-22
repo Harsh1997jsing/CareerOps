@@ -8,6 +8,7 @@ from app.models.base import Base
 
 class Application(Base):
     __tablename__ = "applications"
+    __table_args__ = (UniqueConstraint("job_id", name="uq_applications_job_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), index=True)

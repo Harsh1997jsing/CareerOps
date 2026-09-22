@@ -96,6 +96,54 @@ async def test_generate_document_increments_version_per_job_and_type(db_session,
     assert second.version == 2
 
 
+async def test_generate_document_retries_on_a_version_collision(db_session, tmp_path):
+    # Simulates two concurrent generate calls both computing the same
+    # next version — uq_generated_documents_job_type_version makes the
+    # second commit fail; persist_document() must recompute a fresh
+    # version and retry with a new filename, not 500 or clobber the file
+    # the "other" request already wrote at that version's path.
+    job = await make_job(db_session)
+    settings = _fake_settings(tmp_path)
+    db_session.add(GeneratedDocument(job_id=job.id, type="resume", version=1, file_path="existing.docx"))
+    await db_session.commit()
+
+    with patch("app.services.document_generator.get_settings", return_value=settings), \
+         patch(
+             "app.services.document_generator.resume_generator_service.generate_resume",
+             return_value=_FAKE_RESUME_RESULT,
+         ), \
+         patch("app.services.document_generator.write_resume_docx") as mock_write, \
+         patch("app.services.document_generator.document_review.review_generated_document", AsyncMock()), \
+         patch(
+             "app.services.document_generator._next_version", AsyncMock(side_effect=[1, 2]),
+         ) as mock_next_version:
+        document = await generate_document(db_session, job, "resume")
+
+    assert document.version == 2
+    assert mock_next_version.await_count == 2
+    assert mock_write.call_count == 2
+
+
+async def test_generate_document_raises_after_exhausting_version_retries(db_session, tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    job = await make_job(db_session)
+    settings = _fake_settings(tmp_path)
+    db_session.add(GeneratedDocument(job_id=job.id, type="resume", version=1, file_path="existing.docx"))
+    await db_session.commit()
+
+    with patch("app.services.document_generator.get_settings", return_value=settings), \
+         patch(
+             "app.services.document_generator.resume_generator_service.generate_resume",
+             return_value=_FAKE_RESUME_RESULT,
+         ), \
+         patch("app.services.document_generator.write_resume_docx"), \
+         patch("app.services.document_generator.document_review.review_generated_document", AsyncMock()), \
+         patch("app.services.document_generator._next_version", AsyncMock(return_value=1)):  # always collides
+        with pytest.raises(IntegrityError):
+            await generate_document(db_session, job, "resume")
+
+
 async def test_generate_document_reuses_existing_application(db_session, tmp_path):
     job = await make_job(db_session)
     settings = _fake_settings(tmp_path)

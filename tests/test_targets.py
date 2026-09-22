@@ -1,6 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
-from app.sources.targets import _matches_experience, fetch_all_targets, ingest_all, load_company_targets, search_all
+from app.sources.targets import _experience_haystack, fetch_all_targets, ingest_all, load_company_targets, search_all
 
 COMPANIES_YAML = """
 greenhouse:
@@ -69,15 +69,16 @@ async def test_search_all_returns_fetched_jobs_without_inserting():
     mock_insert.assert_not_called()
 
 
-def test_matches_experience_checks_title_and_description():
-    assert _matches_experience({"title": "Senior Backend Engineer"}, "senior")
-    assert _matches_experience({"title": "Engineer", "description": "5+ years senior IC"}, "senior")
-    assert not _matches_experience({"title": "Junior Backend Engineer"}, "senior")
+def test_experience_haystack_includes_title_and_description():
+    assert "Senior Backend Engineer" in _experience_haystack({"title": "Senior Backend Engineer"})
+    assert "5+ years senior IC" in _experience_haystack({"title": "Engineer", "description": "5+ years senior IC"})
 
 
-def test_matches_experience_blank_query_matches_everything():
-    assert _matches_experience({}, "")
-    assert _matches_experience({}, "   ")
+def test_matches_experience_end_to_end_via_haystack():
+    from app.sources.common import matches_experience
+
+    assert matches_experience(_experience_haystack({"title": "Senior Backend Engineer"}), "senior")
+    assert not matches_experience(_experience_haystack({"title": "Junior Backend Engineer"}), "senior")
 
 
 async def test_search_all_filters_by_experience():

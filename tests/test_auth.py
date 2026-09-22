@@ -1,10 +1,12 @@
 """Unit tests for multi-tenant stateless JWT authentication and user management service."""
 
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.models import Tenant, User
 from app.services.auth import (
     DEFAULT_ADMIN_EMAIL,
     DEFAULT_ADMIN_PASSWORD,
@@ -144,6 +146,27 @@ async def test_create_user_duplicate_email_raises_error(test_session):
         )
 
 
+async def test_create_user_concurrent_duplicate_email_raises_from_commit(test_session):
+    # Same race shape as test_create_tenant_concurrent_duplicate_slug_raises_from_commit.
+    # tenant_id is captured as a plain int up front — the except branch's
+    # rollback() expires every object in the session's identity map
+    # (unlike commit(), expire_on_commit=False doesn't cover rollback), so
+    # touching the `tenant` ORM object's attributes afterward would try a
+    # sync lazy-refresh outside the async greenlet context and blow up.
+    tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
+    tenant_id = tenant.id
+    test_session.add(User(tenant_id=tenant_id, email="race@example.com", hashed_password="x", role="user"))
+    await test_session.commit()
+
+    with patch.object(test_session, "scalar", AsyncMock(return_value=None)):
+        with pytest.raises(UserAlreadyExistsError):
+            await create_user(test_session, tenant_id=tenant_id, email="race@example.com", password="whatever123")
+
+    # Session must still be usable afterward.
+    users = await list_users(test_session, tenant_id=tenant_id)
+    assert sum(1 for u in users if u.email == "race@example.com") == 1
+
+
 async def test_create_user_invalid_role_raises_value_error(test_session):
     """Verify invalid user roles raise a ValueError."""
     tenant = await get_tenant_by_slug(test_session, DEFAULT_TENANT_SLUG)
@@ -215,3 +238,24 @@ async def test_create_and_retrieve_tenant(test_session):
 
     with pytest.raises(TenantAlreadyExistsError):
         await create_tenant(test_session, name="Acme Clone", slug="acme")
+
+
+async def test_create_tenant_concurrent_duplicate_slug_raises_from_commit(test_session):
+    # Simulates two requests racing past create_tenant()'s own
+    # existence-check together: the slug is inserted "concurrently" here,
+    # then the pre-check is forced to report "not found" (as if this
+    # request's read ran before the other's commit) so the real
+    # INSERT+commit below is what must catch the unique-constraint
+    # violation, not the local .scalar() check.
+    test_session.add(Tenant(name="Acme Corp", slug="acme"))
+    await test_session.commit()
+
+    with patch.object(test_session, "scalar", AsyncMock(return_value=None)):
+        with pytest.raises(TenantAlreadyExistsError):
+            await create_tenant(test_session, name="Acme Clone", slug="acme")
+
+    # Session must still be usable afterward — commit() rolled back
+    # cleanly rather than leaving the session mid-transaction.
+    by_slug = await get_tenant_by_slug(test_session, "acme")
+    assert by_slug is not None
+    assert by_slug.name == "Acme Corp"
